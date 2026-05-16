@@ -1,4 +1,4 @@
-.PHONY: setup test check fmt clean ui
+.PHONY: setup test check fmt clean ui deploy
 
 setup:
 	python3 -m venv .venv
@@ -21,3 +21,10 @@ fmt:
 clean:
 	rm -rf .venv .pytest_cache .ruff_cache build dist *.egg-info
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +
+
+# Run tests, then commit (if changes) and push to main. Streamlit Cloud auto-redeploys.
+# Usage: `make deploy` or `make deploy M="add 새 카테고리"`
+deploy: check
+	git add -A
+	git diff --cached --quiet || git commit -m "$(if $(M),$(M),update)"
+	git push origin main

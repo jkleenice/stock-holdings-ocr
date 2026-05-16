@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -29,6 +30,34 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+
+def _require_password() -> None:
+    """Gate the app behind APP_PASSWORD if it is set in secrets.
+
+    No-op if the secret is missing (e.g. local dev), so the gate is opt-in.
+    """
+    try:
+        configured = st.secrets.get("APP_PASSWORD")
+    except Exception:
+        configured = None
+    if not configured:
+        return
+    if st.session_state.get("_authed"):
+        return
+
+    st.title("🔒 비밀번호")
+    pw = st.text_input("암호를 입력하세요", type="password", label_visibility="collapsed")
+    if pw:
+        if pw == configured:
+            st.session_state["_authed"] = True
+            st.rerun()
+        else:
+            st.error("비밀번호가 틀렸습니다.")
+    st.stop()
+
+
+_require_password()
 
 st.title("📊 Stock Holdings OCR")
 st.caption("여러 증권사 스크린샷 → 주식명·보유금액·손익액·손익률을 하나의 표로 통합")
@@ -99,19 +128,40 @@ with st.expander(f"업로드한 이미지 {len(uploaded_files)}장 보기", expa
         cols[idx % len(cols)].image(f, use_container_width=True, caption=f.name)
 
 
-# ── 추출 ────────────────────────────────────────────────────────
+# ── 추출 (병렬 호출) ───────────────────────────────────────────
 results: list[tuple[str, HoldingsSnapshot, str]] = []
 errors: list[tuple[str, str]] = []
 
-progress = st.progress(0.0, text="VLM 호출 준비…")
-for i, f in enumerate(uploaded_files, start=1):
-    progress.progress((i - 1) / len(uploaded_files), text=f"분석 중: {f.name} ({i}/{len(uploaded_files)})")
+original_order = {f.name: i for i, f in enumerate(uploaded_files)}
+total = len(uploaded_files)
+progress = st.progress(0.0, text=f"VLM 동시 호출 시작 (0/{total})…")
+done = 0
+
+
+def _extract_one(uploaded) -> tuple[str, str | None, str | None]:
+    """Returns (filename, snapshot_json_or_none, error_or_none)."""
     try:
-        snap_json = _extract_cached(f.getvalue(), f.name, model)
-        snap = HoldingsSnapshot.model_validate_json(snap_json)
-        results.append((f.name, snap, snap_json))
-    except Exception as exc:
-        errors.append((f.name, str(exc)))
+        snap_json = _extract_cached(uploaded.getvalue(), uploaded.name, model)
+        return (uploaded.name, snap_json, None)
+    except Exception as exc:  # noqa: BLE001 — surface any failure to UI
+        return (uploaded.name, None, str(exc))
+
+
+with ThreadPoolExecutor(max_workers=min(total, 4)) as executor:
+    future_to_file = {executor.submit(_extract_one, f): f for f in uploaded_files}
+    for future in as_completed(future_to_file):
+        name, snap_json, err = future.result()
+        done += 1
+        progress.progress(done / total, text=f"{done}/{total} 완료")
+        if err is not None:
+            errors.append((name, err))
+        else:
+            snap = HoldingsSnapshot.model_validate_json(snap_json)
+            results.append((name, snap, snap_json))
+
+# preserve upload order for display
+results.sort(key=lambda r: original_order[r[0]])
+errors.sort(key=lambda e: original_order[e[0]])
 progress.progress(1.0, text=f"완료: {len(results)}장 성공 / {len(errors)}장 실패")
 
 for name, err in errors:
