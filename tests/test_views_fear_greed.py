@@ -2,7 +2,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from views.fear_greed import _bar_color, _fetch_fng_raw, _korean_label
+from views.fear_greed import (
+    _bar_color,
+    _fetch_fng_raw,
+    _korean_label,
+    _metric_delta,
+    _metric_value,
+)
 
 
 def test_bar_color_extreme_fear_red():
@@ -83,3 +89,30 @@ def test_fetch_fng_raw_raises_on_http_error(monkeypatch):
 
     with pytest.raises(_requests.HTTPError):
         _fetch_fng_raw(limit=1)
+
+
+def test_metric_value_preserves_zero():
+    """Critical: 0 (Extreme Fear bottom) must not be replaced by em-dash."""
+    assert _metric_value(0) == 0
+
+
+def test_metric_value_preserves_hundred():
+    assert _metric_value(100) == 100
+
+
+def test_metric_value_none_becomes_dash():
+    assert _metric_value(None) == "—"
+
+
+def test_metric_delta_signed_difference():
+    assert _metric_delta(50, 30) == 20
+    assert _metric_delta(30, 50) == -20
+
+
+def test_metric_delta_prior_zero_does_not_fallthrough_to_none():
+    """If yesterday was 0, today's delta should still compute (not None)."""
+    assert _metric_delta(15, 0) == 15
+
+
+def test_metric_delta_none_prior_returns_none():
+    assert _metric_delta(50, None) is None

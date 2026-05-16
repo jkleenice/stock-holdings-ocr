@@ -6,6 +6,7 @@ from pathlib import Path
 
 import yaml
 
+from .metrics import aggregate_pnl
 from .schemas import AggregatedPosition, Holding, HoldingsSnapshot
 
 DEFAULT_ALIASES_PATH = (
@@ -103,17 +104,7 @@ def aggregate_by_issuer(
         total_val = sum((h.market_value for h in items if h.market_value is not None), Decimal(0))
         accounts = sorted({h.account for h in items if h.account})
         currency = currencies[0]
-        unrealized_pnls = [h.unrealized_pnl for h in items]
-        total_unrealized_pnl = None
-        if all(value is not None for value in unrealized_pnls):
-            total_unrealized_pnl = sum((value for value in unrealized_pnls if value is not None), Decimal(0))
-
-        unrealized_pnl_pcts = [h.unrealized_pnl_pct for h in items]
-        total_unrealized_pnl_pct = None
-        if unrealized_pnl_pcts and all(value is not None for value in unrealized_pnl_pcts):
-            unique_pcts = {value for value in unrealized_pnl_pcts if value is not None}
-            if len(unique_pcts) == 1:
-                total_unrealized_pnl_pct = next(iter(unique_pcts))
+        total_unrealized_pnl, total_unrealized_pnl_pct = aggregate_pnl(items)
 
         positions.append(
             AggregatedPosition(

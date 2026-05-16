@@ -6,6 +6,7 @@ from pathlib import Path
 
 import yaml
 
+from .metrics import aggregate_pnl
 from .normalizer import (
     _normalize_raw_name,
     load_issuer_aliases,
@@ -87,20 +88,7 @@ def category_pnl_summary(
 ) -> dict[str, tuple[Decimal | None, Decimal | None]]:
     """Per-category `(total_pnl, return_pct)` using value-weighted return.
 
-    Return percent is `total_pnl / (total_market_value - total_pnl) * 100`.
-    Returns `(None, None)` for a bucket if any holding lacks `market_value`
-    or `unrealized_pnl` — partial sums would be misleading.
+    Thin wrapper around `aggregate_pnl` from `holdings_ocr.metrics` — kept here
+    so callers can pass bucketed holdings directly.
     """
-    summary: dict[str, tuple[Decimal | None, Decimal | None]] = {}
-    for category, items in buckets.items():
-        if any(h.market_value is None or h.unrealized_pnl is None for h in items):
-            summary[category] = (None, None)
-            continue
-        total_pnl = sum((h.unrealized_pnl for h in items), Decimal(0))
-        total_market = sum((h.market_value for h in items), Decimal(0))
-        cost_basis = total_market - total_pnl
-        if cost_basis == 0:
-            summary[category] = (total_pnl, None)
-        else:
-            summary[category] = (total_pnl, total_pnl / cost_basis * Decimal("100"))
-    return summary
+    return {category: aggregate_pnl(items) for category, items in buckets.items()}

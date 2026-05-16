@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -8,17 +9,23 @@ from decimal import Decimal
 from pathlib import Path
 
 import altair as alt
+import openai
 import pandas as pd
 import streamlit as st
 
 from holdings_ocr.categorizer import categorize, category_pnl_summary, category_totals
-from holdings_ocr.extractor import MODEL, extract_from_image
+from holdings_ocr.extractor import EXTRACTION_PROMPT, MODEL, extract_from_image
 from holdings_ocr.reporter import build_report, render_markdown
 from holdings_ocr.schemas import HoldingsSnapshot
 
+# Cache invalidates automatically when the extraction prompt changes.
+PROMPT_FINGERPRINT = hashlib.sha256(EXTRACTION_PROMPT.encode("utf-8")).hexdigest()[:16]
+
 
 @st.cache_data(show_spinner=False)
-def _extract_cached(image_bytes: bytes, filename: str, model_id: str) -> str:
+def _extract_cached(image_bytes: bytes, filename: str, model_id: str, prompt_fp: str) -> str:
+    """Cached extraction. `prompt_fp` participates in the cache key so prompt edits invalidate stale results."""
+    del prompt_fp  # only used as part of the cache key
     suffix = Path(filename).suffix or ".png"
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tf:
         tf.write(image_bytes)
@@ -94,8 +101,16 @@ def render() -> None:
 
     def _extract_one(uploaded) -> tuple[str, str | None, str | None]:
         try:
-            snap_json = _extract_cached(uploaded.getvalue(), uploaded.name, model)
+            snap_json = _extract_cached(
+                uploaded.getvalue(), uploaded.name, model, PROMPT_FINGERPRINT
+            )
             return (uploaded.name, snap_json, None)
+        except openai.AuthenticationError:
+            return (uploaded.name, None, "OpenAI 인증 실패 — Streamlit Secrets의 OPENAI_API_KEY 확인")
+        except openai.RateLimitError:
+            return (uploaded.name, None, "OpenAI 호출 한도 초과 — 잠시 후 다시 시도")
+        except openai.APITimeoutError:
+            return (uploaded.name, None, "OpenAI 응답 시간 초과 — 다시 시도")
         except Exception as exc:  # noqa: BLE001
             return (uploaded.name, None, str(exc))
 

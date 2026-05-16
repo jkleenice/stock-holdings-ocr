@@ -2,7 +2,7 @@ from decimal import Decimal
 
 import pytest
 
-from views.holdings import _format_money, _format_pct, _format_pnl
+from views.holdings import PROMPT_FINGERPRINT, _format_money, _format_pct, _format_pnl
 
 
 def test_format_money_with_value():
@@ -63,3 +63,10 @@ def test_format_pct_zero():
 ])
 def test_format_pnl_sign_indicator(value, expected_prefix):
     assert _format_pnl(value).startswith(expected_prefix)
+
+
+def test_prompt_fingerprint_is_sixteen_hex_chars():
+    """Cache invalidates on prompt changes via this fingerprint embedded in the cache key."""
+    assert len(PROMPT_FINGERPRINT) == 16
+    int(PROMPT_FINGERPRINT, 16)  # raises ValueError if not hex
+

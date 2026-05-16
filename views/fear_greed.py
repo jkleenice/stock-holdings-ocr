@@ -47,6 +47,16 @@ def _korean_label(classification: str) -> str:
     return mapping.get(classification, classification)
 
 
+def _metric_value(v: int | None) -> int | str:
+    """Return the value itself, or em-dash when None. Critically: 0 stays 0 (not falsy fallback)."""
+    return v if v is not None else "—"
+
+
+def _metric_delta(current: int, prior: int | None) -> int | None:
+    """Signed difference; None when prior is missing so Streamlit hides the delta indicator."""
+    return (current - prior) if prior is not None else None
+
+
 def render() -> None:
     st.title("😱 Crypto Fear & Greed Index")
     st.caption(
@@ -116,9 +126,9 @@ def render() -> None:
     month_ago = _get_at(29)
 
     c1, c2, c3 = st.columns(3)
-    c1.metric("어제", yesterday or "—", value - yesterday if yesterday is not None else None)
-    c2.metric("일주일 전", week_ago or "—", value - week_ago if week_ago is not None else None)
-    c3.metric("한 달 전", month_ago or "—", value - month_ago if month_ago is not None else None)
+    c1.metric("어제", _metric_value(yesterday), _metric_delta(value, yesterday))
+    c2.metric("일주일 전", _metric_value(week_ago), _metric_delta(value, week_ago))
+    c3.metric("한 달 전", _metric_value(month_ago), _metric_delta(value, month_ago))
     st.caption("metric의 △ 는 현재 값이 과거보다 얼마나 높은지 (양수=탐욕 쪽으로 이동)")
 
     # ── 30일 추이 ────────────────────────────────────────────────

@@ -76,6 +76,7 @@ def extract_from_image(
     response = client.chat.completions.create(
         model=model,
         max_tokens=4096,
+        temperature=0,
         response_format={"type": "json_object"},
         messages=[
             {"role": "system", "content": EXTRACTION_PROMPT},
@@ -94,8 +95,23 @@ def extract_from_image(
         ],
     )
 
-    text = response.choices[0].message.content or ""
-    payload = json.loads(text)
+    choice = response.choices[0]
+    text = choice.message.content or ""
+    finish_reason = getattr(choice, "finish_reason", None)
+
+    if finish_reason == "length":
+        raise ValueError(
+            f"VLM response truncated at max_tokens (finish_reason=length). "
+            f"Preview: {text[:200]!r}"
+        )
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"VLM response was not valid JSON: {exc}. "
+            f"finish_reason={finish_reason}. Preview: {text[:500]!r}"
+        ) from exc
 
     return HoldingsSnapshot(
         source=str(path),
