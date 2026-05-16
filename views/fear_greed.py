@@ -58,20 +58,17 @@ def _metric_delta(current: int, prior: int | None) -> int | None:
 
 
 def render() -> None:
-    st.title("😱 Crypto Fear & Greed Index")
-    st.caption(
-        "Bitcoin 시장 심리 지수 (0=극도의 공포 → 100=극도의 탐욕). "
-        "출처: alternative.me · 1시간마다 자동 갱신"
-    )
+    st.title("😱 코인 공포·탐욕 지수")
+    st.caption("0(극도의 공포)에서 100(극도의 탐욕)까지, 비트코인 시장 심리를 보여드려요")
 
     try:
         data = _fetch_fng(limit=30)
-    except Exception as exc:
-        st.error(f"데이터를 가져올 수 없습니다: {exc}")
+    except Exception:
+        st.error("잠시 후 다시 시도해주세요. 지수 서버에 일시적으로 연결되지 않아요.")
         return
 
     if not data:
-        st.warning("데이터가 비어 있습니다.")
+        st.warning("지금은 표시할 데이터가 없어요")
         return
 
     current = data[0]
@@ -125,11 +122,18 @@ def render() -> None:
     week_ago = _get_at(7)
     month_ago = _get_at(29)
 
+    def _safe_metric(col, label: str, past: int | None) -> None:
+        if past is None:
+            col.metric(label, "데이터 없음")
+        else:
+            col.metric(label, past, value - past)
+
     c1, c2, c3 = st.columns(3)
-    c1.metric("어제", _metric_value(yesterday), _metric_delta(value, yesterday))
-    c2.metric("일주일 전", _metric_value(week_ago), _metric_delta(value, week_ago))
-    c3.metric("한 달 전", _metric_value(month_ago), _metric_delta(value, month_ago))
-    st.caption("metric의 △ 는 현재 값이 과거보다 얼마나 높은지 (양수=탐욕 쪽으로 이동)")
+    _safe_metric(c1, "어제", yesterday)
+    _safe_metric(c2, "지난주", week_ago)
+    _safe_metric(c3, "한 달 전", month_ago)
+    st.caption("▲는 탐욕 쪽, ▼는 공포 쪽으로 움직였다는 뜻이에요")
+    st.caption("공포·탐욕 지수는 손익과 무관한 시장 심리 지표예요")
 
     # ── 30일 추이 ────────────────────────────────────────────────
     st.subheader("30일 추이")
@@ -143,9 +147,11 @@ def render() -> None:
     ])
     st.line_chart(df.set_index("날짜")["지수"], height=240)
 
-    with st.expander("원시 데이터 (최근 30일)"):
+    with st.expander("30일 데이터 보기"):
         st.dataframe(
             df.assign(분류=df["분류"].map(lambda c: f"{_korean_label(c)} ({c})")),
             use_container_width=True,
             hide_index=True,
         )
+
+    st.caption("매시간 자동 갱신 · alternative.me")

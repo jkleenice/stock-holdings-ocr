@@ -1,8 +1,19 @@
+import json
+from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
-from views.holdings import PROMPT_FINGERPRINT, _format_money, _format_pct, _format_pnl
+from holdings_ocr.schemas import HoldingsSnapshot
+from views.holdings import (
+    PROMPT_FINGERPRINT,
+    _content_hash,
+    _extract_with_disk_cache,
+    _format_money,
+    _format_pct,
+    _format_pnl,
+)
 
 
 def test_format_money_with_value():
@@ -69,4 +80,133 @@ def test_prompt_fingerprint_is_sixteen_hex_chars():
     """Cache invalidates on prompt changes via this fingerprint embedded in the cache key."""
     assert len(PROMPT_FINGERPRINT) == 16
     int(PROMPT_FINGERPRINT, 16)  # raises ValueError if not hex
+
+
+# ── _content_hash ────────────────────────────────────────────────
+
+
+def test_content_hash_same_inputs_produce_same_key():
+    a = _content_hash(b"image-bytes", "gpt-4o", "fp1")
+    b = _content_hash(b"image-bytes", "gpt-4o", "fp1")
+    assert a == b
+
+
+def test_content_hash_different_bytes_produce_different_keys():
+    a = _content_hash(b"image-a", "gpt-4o", "fp1")
+    b = _content_hash(b"image-b", "gpt-4o", "fp1")
+    assert a != b
+
+
+def test_content_hash_different_model_produces_different_key():
+    a = _content_hash(b"img", "gpt-4o", "fp1")
+    b = _content_hash(b"img", "gpt-4o-mini", "fp1")
+    assert a != b
+
+
+def test_content_hash_different_prompt_fp_produces_different_key():
+    a = _content_hash(b"img", "gpt-4o", "fp1")
+    b = _content_hash(b"img", "gpt-4o", "fp2")
+    assert a != b
+
+
+def test_content_hash_is_64_hex_chars():
+    h = _content_hash(b"img", "gpt-4o", "fp")
+    int(h, 16)
+    assert len(h) == 64
+
+
+# ── _extract_with_disk_cache ─────────────────────────────────────
+
+
+def _make_fake_snapshot(source: str) -> HoldingsSnapshot:
+    return HoldingsSnapshot(
+        source=source,
+        extracted_at=datetime.now(timezone.utc),
+        holdings=[],
+        broker_hint=None,
+        raw_text="",
+    )
+
+
+def test_disk_cache_returns_existing_file_without_calling_extractor(tmp_path: Path, monkeypatch):
+    image_bytes = b"image-bytes-for-cache-hit"
+    model = "gpt-4o"
+    prompt_fp = "abc123"
+    cache_key = _content_hash(image_bytes, model, prompt_fp)
+
+    cache_dir = tmp_path / "snapshots"
+    cache_dir.mkdir()
+    cached_json = '{"holdings": [], "broker_hint": null, "raw_text": "cached"}'
+    (cache_dir / f"{cache_key}.json").write_text(cached_json, encoding="utf-8")
+
+    def fail_extract(*args, **kwargs):
+        raise AssertionError("extract_from_image must not be called on cache hit")
+
+    monkeypatch.setattr("views.holdings.extract_from_image", fail_extract)
+
+    result = _extract_with_disk_cache(image_bytes, ".png", model, prompt_fp, cache_dir=cache_dir)
+    assert result == cached_json
+
+
+def test_disk_cache_writes_new_file_on_miss(tmp_path: Path, monkeypatch):
+    image_bytes = b"image-bytes-for-cache-miss"
+    model = "gpt-4o"
+    prompt_fp = "xyz789"
+    cache_dir = tmp_path / "snapshots"
+
+    def fake_extract(path, model):
+        return _make_fake_snapshot(str(path))
+
+    monkeypatch.setattr("views.holdings.extract_from_image", fake_extract)
+
+    result = _extract_with_disk_cache(image_bytes, ".png", model, prompt_fp, cache_dir=cache_dir)
+    parsed = json.loads(result)
+    assert parsed["holdings"] == []
+
+    cache_key = _content_hash(image_bytes, model, prompt_fp)
+    cache_file = cache_dir / f"{cache_key}.json"
+    assert cache_file.exists()
+    assert cache_file.read_text(encoding="utf-8") == result
+
+
+def test_disk_cache_second_call_hits_cache_and_skips_extractor(tmp_path: Path, monkeypatch):
+    image_bytes = b"image-for-double-call"
+    model = "gpt-4o"
+    prompt_fp = "p1"
+    cache_dir = tmp_path / "snapshots"
+
+    call_count = {"n": 0}
+
+    def fake_extract(path, model):
+        call_count["n"] += 1
+        return _make_fake_snapshot(str(path))
+
+    monkeypatch.setattr("views.holdings.extract_from_image", fake_extract)
+
+    _extract_with_disk_cache(image_bytes, ".png", model, prompt_fp, cache_dir=cache_dir)
+    _extract_with_disk_cache(image_bytes, ".png", model, prompt_fp, cache_dir=cache_dir)
+    _extract_with_disk_cache(image_bytes, ".png", model, prompt_fp, cache_dir=cache_dir)
+
+    assert call_count["n"] == 1  # only first call hits the extractor
+
+
+def test_disk_cache_ignores_filename_extension_for_key(tmp_path: Path, monkeypatch):
+    """Same bytes uploaded as .png or .jpg should hit the same cache entry."""
+    image_bytes = b"same-bytes-different-suffix"
+    model = "gpt-4o"
+    prompt_fp = "p1"
+    cache_dir = tmp_path / "snapshots"
+
+    call_count = {"n": 0}
+
+    def fake_extract(path, model):
+        call_count["n"] += 1
+        return _make_fake_snapshot(str(path))
+
+    monkeypatch.setattr("views.holdings.extract_from_image", fake_extract)
+
+    _extract_with_disk_cache(image_bytes, ".png", model, prompt_fp, cache_dir=cache_dir)
+    _extract_with_disk_cache(image_bytes, ".jpeg", model, prompt_fp, cache_dir=cache_dir)
+
+    assert call_count["n"] == 1  # second call hits cache despite different suffix
 

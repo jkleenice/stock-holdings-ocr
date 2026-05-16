@@ -3,7 +3,7 @@ from __future__ import annotations
 import streamlit as st
 
 
-st.set_page_config(page_title="Holdings OCR", layout="wide", page_icon="📊")
+st.set_page_config(page_title="보유종목", layout="wide", page_icon="📊")
 
 # iOS "Add to Home Screen" PWA hints. Streamlit injects these into the body but
 # iOS Safari still respects apple-* meta tags wherever they appear.
@@ -11,7 +11,7 @@ st.markdown(
     """
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="default">
-    <meta name="apple-mobile-web-app-title" content="Holdings">
+    <meta name="apple-mobile-web-app-title" content="보유종목">
     <meta name="theme-color" content="#4C78A8">
     """,
     unsafe_allow_html=True,
@@ -29,14 +29,14 @@ def _require_password() -> None:
     if st.session_state.get("_authed"):
         return
 
-    st.title("🔒 비밀번호")
-    pw = st.text_input("암호를 입력하세요", type="password", label_visibility="collapsed")
+    st.title("🔒 잠겨 있어요")
+    pw = st.text_input("비밀번호를 입력해주세요", type="password", label_visibility="collapsed")
     if pw:
         if pw == configured:
             st.session_state["_authed"] = True
             st.rerun()
         else:
-            st.error("비밀번호가 틀렸습니다.")
+            st.error("비밀번호가 일치하지 않아요. 다시 확인해주세요.")
     st.stop()
 
 
@@ -45,13 +45,12 @@ _require_password()
 
 # 사이드바에서 기능 선택
 FEATURES = {
-    "📊 Holdings OCR": "holdings",
-    "😱 공포지수 (Crypto)": "fear_greed",
-    "📈 VIX 비교": "vix",
+    "📊 보유종목": "holdings",
+    "😱 코인 공포·탐욕 지수": "fear_greed",
+    "📈 변동성 지수 (준비 중)": "vix",
 }
 
 with st.sidebar:
-    st.subheader("기능 선택")
     selected_label = st.radio(
         "기능",
         options=list(FEATURES.keys()),

@@ -30,3 +30,6 @@ tests/fixtures/*
 
 # OMC / Claude project state
 .omc/
+
+# Disk-based snapshot cache (contains extracted portfolio data — never commit)
+.cache/
