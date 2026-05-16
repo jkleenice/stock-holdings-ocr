@@ -6,6 +6,7 @@ pandas>=2.0
 altair>=5.0
 requests>=2.31
 plotly>=5.18
+yfinance>=0.2.40
 
 # Install this project itself so `from holdings_ocr import ...` works on Streamlit Cloud.
 -e .
