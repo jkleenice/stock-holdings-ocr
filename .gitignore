@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# Env
+.env
+.env.local
+
+# OS
+.DS_Store
+
+# Local outputs
+data/snapshots/
+data/reports/
+
+# Test fixtures: ignore real screenshots, keep the README placeholder
+tests/fixtures/*
+!tests/fixtures/README.md
+
+# Streamlit secrets (never commit the real file; the .example template is fine)
+.streamlit/secrets.toml
+
+# OMC / Claude project state
+.omc/

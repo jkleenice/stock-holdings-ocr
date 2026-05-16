@@ -1,0 +1,74 @@
+# category -> list of issuer names (post-normalization).
+# A holding goes to AT MOST ONE category — the same issuer must NOT appear
+# under two categories. The loader raises ValueError on overlap.
+#
+# Issuer names match what `normalizer.resolve_issuer` returns:
+# - For aliased holdings (e.g. 알파벳 A), use the canonical issuer (Alphabet).
+# - For ETFs and unaliased holdings, use the raw_name exactly as extracted.
+
+구글:
+  - Alphabet
+  - "ACE 구글밸류체인액티브"
+
+메타:
+  - Meta Platforms
+  - METU
+
+팔란티어:
+  - Palantir Technologies
+  - PLTU
+
+마이크로소프트:
+  - Microsoft
+  - "ACE 마이크로소프트밸류체인액티..."
+
+테슬라:
+  - "ACE 테슬라밸류체인액티브"
+  - "KODEX 테슬라밸류체인FactSet"
+  - TSLL
+  - TSMX
+
+엔비디아:
+  - Nvidia
+
+애플:
+  - Apple
+
+브로드컴:
+  - Broadcom
+  - AVGX
+
+미국시장:
+  - "S&P 500 성장주 뱅가드 ETF"
+  - "ACE 미국S&P500"
+  - "TIGER 미국나스닥100"
+  - SGOV
+  - UPRO
+
+금:
+  - UGL
+  - "ACE KRX금현물"
+
+이더리움:
+  - ETHU
+
+방산:
+  - DFEN
+
+넷플릭스:
+  - Netflix
+
+나이키:
+  - Nike
+
+오라클:
+  - Oracle
+
+조비 에비에이션:
+  - Joby Aviation
+
+AI 반도체:
+  - "TIGER AI반도체핵심공정"
+
+비트코인:
+  - BTCL

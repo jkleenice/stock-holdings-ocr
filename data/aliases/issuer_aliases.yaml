@@ -1,0 +1,19 @@
+# issuer -> list of ticker symbols that should be aggregated into that issuer.
+# Add entries here whenever the report should collapse multiple share classes
+# or multiple listings of the same underlying company.
+
+Alphabet:
+  - GOOGL
+  - GOOG
+
+Berkshire Hathaway:
+  - BRK.A
+  - BRK.B
+
+News Corp:
+  - NWSA
+  - NWS
+
+Fox Corporation:
+  - FOXA
+  - FOX
