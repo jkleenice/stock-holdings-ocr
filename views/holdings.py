@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import tempfile
 import time
@@ -25,6 +26,7 @@ PROMPT_FINGERPRINT = hashlib.sha256(EXTRACTION_PROMPT.encode("utf-8")).hexdigest
 # On-disk cache of OCR results. Survives Streamlit's in-memory cache eviction
 # within the container lifetime. Gitignored — never committed to a public repo.
 CACHE_DIR = Path(".cache/holdings-ocr/snapshots")
+CURRENT_HOLDINGS_FILE = Path(".cache/holdings-ocr/current_holdings.json")
 
 
 def _content_hash(image_bytes: bytes, model_id: str, prompt_fp: str) -> str:
@@ -77,6 +79,51 @@ def _extract_with_disk_cache(
     return snapshot_json
 
 
+def _save_current_holdings(
+    results: list[tuple[str, HoldingsSnapshot, str]],
+    path: Path = CURRENT_HOLDINGS_FILE,
+) -> None:
+    payload = {
+        "version": 1,
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "files": [{"name": name, "snapshot_json": snap_json} for name, _, snap_json in results],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _load_current_holdings(
+    path: Path = CURRENT_HOLDINGS_FILE,
+) -> list[tuple[str, HoldingsSnapshot, str]]:
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+
+    files = payload.get("files") if isinstance(payload, dict) else None
+    if not isinstance(files, list):
+        return []
+
+    results: list[tuple[str, HoldingsSnapshot, str]] = []
+    try:
+        for item in files:
+            if not isinstance(item, dict):
+                return []
+            name = str(item["name"])
+            snap_json = str(item["snapshot_json"])
+            snap = HoldingsSnapshot.model_validate_json(snap_json)
+            results.append((name, snap, snap_json))
+    except (KeyError, ValueError):
+        return []
+    return results
+
+
+def _clear_current_holdings(path: Path = CURRENT_HOLDINGS_FILE) -> None:
+    path.unlink(missing_ok=True)
+
+
 @st.cache_data(show_spinner=False)
 def _extract_cached(image_bytes: bytes, suffix: str, model_id: str, prompt_fp: str) -> str:
     """In-memory cache wrapping the disk cache wrapping the API."""
@@ -110,6 +157,8 @@ def render() -> None:
     st.title("📊 내 보유종목")
     st.caption("여러 증권사 스크린샷을 한 번에 합쳐서 보여드려요")
 
+    saved_results = _load_current_holdings()
+
     with st.sidebar:
         st.subheader("분석 설정")
         if os.environ.get("OPENAI_API_KEY"):
@@ -118,86 +167,105 @@ def render() -> None:
             st.error("분석 키가 설정되지 않았어요")
             st.caption("관리자에게 문의해주세요")
         model = st.text_input("분석 모델", value=MODEL, help="gpt-4o 권장")
+        if saved_results:
+            st.divider()
+            st.success("저장된 보유종목 표시 중")
+            if st.button("새로 등록", type="primary", use_container_width=True):
+                _clear_current_holdings()
+                st.rerun()
 
-    uploaded_files = st.file_uploader(
-        "증권사 앱 캡처 (여러 장 가능)",
-        type=["png", "jpg", "jpeg", "webp", "gif"],
-        accept_multiple_files=True,
-    )
-
-    if not uploaded_files:
-        st.info("증권사 앱 캡처를 올려주세요. 자동으로 분석할게요.")
-        return
-
-    # ── 이미지 미리보기 ─────────────────────────────────────────────
-    with st.expander(f"올린 이미지 {len(uploaded_files)}장", expanded=len(uploaded_files) <= 3):
-        cols = st.columns(min(len(uploaded_files), 4))
-        for idx, f in enumerate(uploaded_files):
-            cols[idx % len(cols)].image(f, use_container_width=True, caption=f.name)
-
-    # ── 추출 (병렬 호출) ───────────────────────────────────────────
     results: list[tuple[str, HoldingsSnapshot, str]] = []
     errors: list[tuple[str, str]] = []
 
-    original_order = {f.name: i for i, f in enumerate(uploaded_files)}
-    total = len(uploaded_files)
-    progress = st.progress(0.0, text=f"분석 중... (0/{total})")
-    done = 0
+    if saved_results:
+        results = saved_results
+        st.info("마지막으로 분석한 보유종목을 불러왔어요. 새 캡처로 바꾸려면 왼쪽의 새로 등록을 누르세요.")
+    else:
+        uploaded_files = st.file_uploader(
+            "증권사 앱 캡처 (여러 장 가능)",
+            type=["png", "jpg", "jpeg", "webp", "gif"],
+            accept_multiple_files=True,
+        )
 
-    def _extract_one(uploaded) -> tuple[str, str | None, str | None, float]:
-        suffix = Path(uploaded.name).suffix or ".png"
-        t0 = time.perf_counter()
-        try:
-            snap_json = _extract_cached(
-                uploaded.getvalue(), suffix, model, PROMPT_FINGERPRINT
-            )
-            return (uploaded.name, snap_json, None, time.perf_counter() - t0)
-        except openai.AuthenticationError:
-            return (uploaded.name, None, "OpenAI 인증 실패 — Streamlit Secrets의 OPENAI_API_KEY 확인", time.perf_counter() - t0)
-        except openai.RateLimitError:
-            return (uploaded.name, None, "OpenAI 호출 한도 초과 — 잠시 후 다시 시도", time.perf_counter() - t0)
-        except openai.APITimeoutError:
-            return (uploaded.name, None, "OpenAI 응답 시간 초과 — 다시 시도", time.perf_counter() - t0)
-        except Exception as exc:  # noqa: BLE001
-            return (uploaded.name, None, str(exc), time.perf_counter() - t0)
+        if not uploaded_files:
+            st.info("증권사 앱 캡처를 올려주세요. 자동으로 분석할게요.")
+            return
 
-    wall_start = time.perf_counter()
-    per_task_elapsed: list[tuple[str, float]] = []
-    with ThreadPoolExecutor(max_workers=min(total, 4)) as executor:
-        future_to_file = {executor.submit(_extract_one, f): f for f in uploaded_files}
-        for future in as_completed(future_to_file):
-            name, snap_json, err, elapsed = future.result()
-            per_task_elapsed.append((name, elapsed))
-            done += 1
-            progress.progress(done / total, text=f"분석 중... ({done}/{total})")
-            if err is not None:
-                errors.append((name, err))
-            else:
-                snap = HoldingsSnapshot.model_validate_json(snap_json)
-                results.append((name, snap, snap_json))
-    wall_elapsed = time.perf_counter() - wall_start
+        # ── 이미지 미리보기 ─────────────────────────────────────────────
+        with st.expander(f"올린 이미지 {len(uploaded_files)}장", expanded=len(uploaded_files) <= 3):
+            cols = st.columns(min(len(uploaded_files), 4))
+            for idx, f in enumerate(uploaded_files):
+                cols[idx % len(cols)].image(f, use_container_width=True, caption=f.name)
 
-    results.sort(key=lambda r: original_order[r[0]])
-    errors.sort(key=lambda e: original_order[e[0]])
-    progress.progress(1.0, text=f"{len(results)}장 분석 완료")
+        # ── 추출 (병렬 호출) ───────────────────────────────────────────
 
-    # 진단용: 벽시계 vs 각 작업 합계. 병렬이면 wall ≪ sum.
-    sum_elapsed = sum(t for _, t in per_task_elapsed)
-    parallelism_hint = "병렬 ✓" if wall_elapsed < sum_elapsed * 0.7 else "직렬 의심 ⚠️"
-    st.caption(
-        f"⏱ 전체 {wall_elapsed:.1f}초 · 각 합계 {sum_elapsed:.1f}초 · {parallelism_hint}"
-    )
+        original_order = {f.name: i for i, f in enumerate(uploaded_files)}
+        total = len(uploaded_files)
+        progress = st.progress(0.0, text=f"분석 중... (0/{total})")
+        done = 0
 
-    for name, err in errors:
-        with st.container():
-            st.warning(f"⚠️  {name} 분석에 실패했어요. 잠시 후 다시 올려주세요.")
-            with st.expander("자세한 오류 보기"):
-                st.caption(err)
+        def _extract_one(uploaded) -> tuple[str, str | None, str | None, float]:
+            suffix = Path(uploaded.name).suffix or ".png"
+            t0 = time.perf_counter()
+            try:
+                snap_json = _extract_cached(
+                    uploaded.getvalue(), suffix, model, PROMPT_FINGERPRINT
+                )
+                return (uploaded.name, snap_json, None, time.perf_counter() - t0)
+            except openai.AuthenticationError:
+                return (uploaded.name, None, "OpenAI 인증 실패 — Streamlit Secrets의 OPENAI_API_KEY 확인", time.perf_counter() - t0)
+            except openai.RateLimitError:
+                return (uploaded.name, None, "OpenAI 호출 한도 초과 — 잠시 후 다시 시도", time.perf_counter() - t0)
+            except openai.APITimeoutError:
+                return (uploaded.name, None, "OpenAI 응답 시간 초과 — 다시 시도", time.perf_counter() - t0)
+            except Exception as exc:  # noqa: BLE001
+                return (uploaded.name, None, str(exc), time.perf_counter() - t0)
+
+        wall_start = time.perf_counter()
+        per_task_elapsed: list[tuple[str, float]] = []
+        with ThreadPoolExecutor(max_workers=min(total, 4)) as executor:
+            future_to_file = {executor.submit(_extract_one, f): f for f in uploaded_files}
+            for future in as_completed(future_to_file):
+                name, snap_json, err, elapsed = future.result()
+                per_task_elapsed.append((name, elapsed))
+                done += 1
+                progress.progress(done / total, text=f"분석 중... ({done}/{total})")
+                if err is not None:
+                    errors.append((name, err))
+                else:
+                    snap = HoldingsSnapshot.model_validate_json(snap_json)
+                    results.append((name, snap, snap_json))
+        wall_elapsed = time.perf_counter() - wall_start
+
+        results.sort(key=lambda r: original_order[r[0]])
+        errors.sort(key=lambda e: original_order[e[0]])
+        progress.progress(1.0, text=f"{len(results)}장 분석 완료")
+
+        # 진단용: 벽시계 vs 각 작업 합계. 병렬이면 wall ≪ sum.
+        sum_elapsed = sum(t for _, t in per_task_elapsed)
+        parallelism_hint = "병렬 ✓" if wall_elapsed < sum_elapsed * 0.7 else "직렬 의심 ⚠️"
+        st.caption(
+            f"⏱ 전체 {wall_elapsed:.1f}초 · 각 합계 {sum_elapsed:.1f}초 · {parallelism_hint}"
+        )
+
+        if results:
+            try:
+                _save_current_holdings(results)
+                st.success("이번 분석 결과를 저장했어요. 다음에 다시 열어도 이 보유종목을 먼저 보여줍니다.")
+            except OSError as exc:
+                st.warning("분석 결과를 저장하지 못했어요.")
+                st.caption(str(exc))
+
+        for name, err in errors:
+            with st.container():
+                st.warning(f"⚠️  {name} 분석에 실패했어요. 잠시 후 다시 올려주세요.")
+                with st.expander("자세한 오류 보기"):
+                    st.caption(err)
 
     if not results:
         return
 
-    # ── 통합 표 ─────────────────────────────────────────────────────
+    # ── 표시용 데이터 준비 ───────────────────────────────────────────
     show_source = len(results) > 1
     rows = []
     for source_name, snap, _ in results:
@@ -212,27 +280,16 @@ def render() -> None:
                 row["출처"] = source_name
             rows.append(row)
 
-    st.subheader("전체 종목")
     total_holdings = sum(len(snap.holdings) for _, snap, _ in results)
+    all_holdings = [h for _, snap, _ in results for h in snap.holdings]
     st.caption(
         f"{len(results)}장에서 {total_holdings}개 종목을 찾았어요 · "
         f"이번 분석 약 ${len(results) * 0.01:.2f}"
     )
 
-    df = pd.DataFrame(rows)
-    st.dataframe(df, use_container_width=True, hide_index=True)
-
-    st.download_button(
-        "엑셀로 받기",
-        data=df.to_csv(index=False).encode("utf-8-sig"),
-        file_name="holdings_combined.csv",
-        mime="text/csv",
-    )
-
     # ── 테마별로 보기 ────────────────────────────────────────────
     st.subheader("테마별로 보기")
 
-    all_holdings = [h for _, snap, _ in results for h in snap.holdings]
     try:
         cat_buckets, uncategorized = categorize(all_holdings)
     except ValueError as exc:
@@ -271,7 +328,6 @@ def render() -> None:
         )
 
         cat_df = pd.DataFrame(cat_rows)
-        st.dataframe(cat_df, use_container_width=True, hide_index=True)
 
         if sort_mode == "평가금액":
             chart_rows = [
@@ -476,6 +532,8 @@ def render() -> None:
                 st.caption("회색=원금, 파랑=평가금액, 위 숫자=손익 (초록=수익, 빨강=손실)")
             if skipped:
                 st.caption(f"⚠️  손익 정보가 없는 테마는 제외됐어요: {', '.join(skipped)}")
+
+        st.dataframe(cat_df, use_container_width=True, hide_index=True)
     else:
         st.info("분류된 종목이 없어요")
 
@@ -483,6 +541,18 @@ def render() -> None:
         with st.expander(f"⚠️  분류되지 않은 {len(uncategorized)}개 종목"):
             for h in uncategorized:
                 st.text(f"• {h.raw_name}  ({_format_money(h.market_value)})")
+
+    # ── 통합 표 ─────────────────────────────────────────────────────
+    st.subheader("전체 종목")
+    df = pd.DataFrame(rows)
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    st.download_button(
+        "엑셀로 받기",
+        data=df.to_csv(index=False).encode("utf-8-sig"),
+        file_name="holdings_combined.csv",
+        mime="text/csv",
+    )
 
     # ── 자세히 보기 ──────────────────────────────────────────────
     with st.expander("자세히 보기"):

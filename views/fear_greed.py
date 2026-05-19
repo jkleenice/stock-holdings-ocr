@@ -57,31 +57,18 @@ def _metric_delta(current: int, prior: int | None) -> int | None:
     return (current - prior) if prior is not None else None
 
 
-def render() -> None:
-    st.title("😱 코인 공포·탐욕 지수")
-    st.caption("0(극도의 공포)에서 100(극도의 탐욕)까지, 비트코인 시장 심리를 보여드려요")
-
-    try:
-        data = _fetch_fng(limit=30)
-    except Exception:
-        st.error("잠시 후 다시 시도해주세요. 지수 서버에 일시적으로 연결되지 않아요.")
-        return
-
-    if not data:
-        st.warning("지금은 표시할 데이터가 없어요")
-        return
-
-    current = data[0]
-    value = int(current["value"])
-    classification = current["value_classification"]
-    label_ko = _korean_label(classification)
-
-    # ── 자동차 계기판 스타일 게이지 ────────────────────────────
+def _fng_gauge_figure(value: int, label_ko: str, classification: str) -> go.Figure:
     fig = go.Figure(go.Indicator(
         mode="gauge+number",
         value=value,
         number={"font": {"size": 60}},
-        title={"text": f"<b>{label_ko}</b><br><span style='font-size:0.8em;color:gray'>{classification}</span>", "font": {"size": 22}},
+        title={
+            "text": (
+                f"<b>{label_ko}</b><br>"
+                f"<span style='font-size:0.8em;color:gray'>{classification}</span>"
+            ),
+            "font": {"size": 22},
+        },
         domain={"x": [0, 1], "y": [0, 1]},
         gauge={
             "axis": {
@@ -110,17 +97,40 @@ def render() -> None:
         margin=dict(l=20, r=20, t=80, b=20),
         paper_bgcolor="rgba(0,0,0,0)",
     )
-    st.plotly_chart(fig, use_container_width=True)
+    return fig
 
-    # ── 비교 지표 (어제/일주일/한 달 전 대비) ────────────────
-    def _get_at(idx: int) -> int | None:
-        if idx >= len(data):
-            return None
-        return int(data[idx]["value"])
 
-    yesterday = _get_at(1)
-    week_ago = _get_at(7)
-    month_ago = _get_at(29)
+def _fng_history_df(data: list[dict]) -> pd.DataFrame:
+    return pd.DataFrame([
+        {
+            "날짜": datetime.fromtimestamp(int(d["timestamp"])),
+            "지수": int(d["value"]),
+            "분류": d["value_classification"],
+        }
+        for d in reversed(data)
+    ])
+
+
+def _get_fng_at(data: list[dict], idx: int) -> int | None:
+    if idx >= len(data):
+        return None
+    return int(data[idx]["value"])
+
+
+def _render_fng_panel(data: list[dict]) -> None:
+    st.subheader("코인 공포·탐욕")
+    if not data:
+        st.warning("지금은 공포·탐욕 지수 데이터가 없어요")
+        return
+
+    current = data[0]
+    value = int(current["value"])
+    classification = current["value_classification"]
+    label_ko = _korean_label(classification)
+    st.plotly_chart(
+        _fng_gauge_figure(value, label_ko, classification),
+        use_container_width=True,
+    )
 
     def _safe_metric(col, label: str, past: int | None) -> None:
         if past is None:
@@ -129,29 +139,77 @@ def render() -> None:
             col.metric(label, past, value - past)
 
     c1, c2, c3 = st.columns(3)
-    _safe_metric(c1, "어제", yesterday)
-    _safe_metric(c2, "지난주", week_ago)
-    _safe_metric(c3, "한 달 전", month_ago)
-    st.caption("▲는 탐욕 쪽, ▼는 공포 쪽으로 움직였다는 뜻이에요")
+    _safe_metric(c1, "어제", _get_fng_at(data, 1))
+    _safe_metric(c2, "지난주", _get_fng_at(data, 7))
+    _safe_metric(c3, "한 달 전", _get_fng_at(data, 29))
     st.caption("공포·탐욕 지수는 손익과 무관한 시장 심리 지표예요")
 
-    # ── 30일 추이 ────────────────────────────────────────────────
-    st.subheader("30일 추이")
-    df = pd.DataFrame([
-        {
-            "날짜": datetime.fromtimestamp(int(d["timestamp"])),
-            "지수": int(d["value"]),
-            "분류": d["value_classification"],
-        }
-        for d in reversed(data)
-    ])
-    st.line_chart(df.set_index("날짜")["지수"], height=240)
 
-    with st.expander("30일 데이터 보기"):
+def _render_fng_history(data: list[dict]) -> None:
+    if not data:
+        return
+
+    with st.expander("공포·탐욕 30일 추이"):
+        df = _fng_history_df(data)
+        st.line_chart(df.set_index("날짜")["지수"], height=240)
         st.dataframe(
             df.assign(분류=df["분류"].map(lambda c: f"{_korean_label(c)} ({c})")),
             use_container_width=True,
             hide_index=True,
         )
+        st.caption("매시간 자동 갱신 · alternative.me")
 
-    st.caption("매시간 자동 갱신 · alternative.me")
+
+def _market_status_summary(data: list[dict], drawdown_rows: list[dict]) -> str:
+    parts = []
+    if data:
+        current = data[0]
+        value = int(current["value"])
+        parts.append(f"코인 심리는 {_korean_label(current['value_classification'])} {value}점")
+    if drawdown_rows:
+        worst = drawdown_rows[0]
+        worst_amount = max(0.0, -worst["오늘 하락률"])
+        parts.append(f"가장 많이 빠진 티커는 {worst['티커']} -{worst_amount:.2f}%")
+    if not parts:
+        return "공포·탐욕 지수 또는 추적 티커를 불러오면 오늘 상태를 한 줄로 요약해요."
+    return " · ".join(parts)
+
+
+def render() -> None:
+    st.title("😱 시장 심리·고점 대비 하락률")
+    st.caption("코인 공포·탐욕 지수와 저장한 티커들의 최고점 대비 하락률을 한 화면에서 봅니다")
+
+    from views import drawdown
+
+    try:
+        data = _fetch_fng(limit=30)
+    except Exception:
+        st.error("잠시 후 다시 시도해주세요. 지수 서버에 일시적으로 연결되지 않아요.")
+        data = []
+
+    tracked, period = drawdown.render_drawdown_controls(key_prefix="market_drawdown")
+    rows: list[dict] = []
+    failures: list[tuple[str, str]] = []
+    if tracked:
+        st.caption("추적 중: " + ", ".join(f"`{ticker}`" for ticker in tracked))
+        with st.spinner("추적 티커 가격을 불러오는 중..."):
+            rows, failures = drawdown.load_drawdown_rows(tracked, period)
+
+    st.info(_market_status_summary(data, rows))
+
+    left, right = st.columns([1.15, 0.85])
+    with left:
+        _render_fng_panel(data)
+    with right:
+        drawdown.render_drawdown_top3(rows)
+
+    st.divider()
+    if tracked:
+        drawdown.render_drawdown_gauges(rows)
+        drawdown.render_drawdown_table(rows)
+        drawdown.render_drawdown_failures(failures)
+    else:
+        st.info("추적 티커를 저장하면 전체 하락률 게이지가 여기에 표시됩니다.")
+        st.caption("예: AAPL, MSFT, NVDA, QQQ, BTC-USD, 005930.KS")
+
+    _render_fng_history(data)

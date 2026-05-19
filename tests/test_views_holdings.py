@@ -9,10 +9,13 @@ from holdings_ocr.schemas import HoldingsSnapshot
 from views.holdings import (
     PROMPT_FINGERPRINT,
     _content_hash,
+    _clear_current_holdings,
     _extract_with_disk_cache,
     _format_money,
     _format_pct,
     _format_pnl,
+    _load_current_holdings,
+    _save_current_holdings,
 )
 
 
@@ -210,3 +213,49 @@ def test_disk_cache_ignores_filename_extension_for_key(tmp_path: Path, monkeypat
 
     assert call_count["n"] == 1  # second call hits cache despite different suffix
 
+
+# ── latest holdings persistence ─────────────────────────────────
+
+
+def test_save_and_load_current_holdings_round_trip(tmp_path: Path):
+    path = tmp_path / "current_holdings.json"
+    snap = _make_fake_snapshot("first.png")
+    snap_json = snap.model_dump_json(indent=2)
+
+    _save_current_holdings([("first.png", snap, snap_json)], path=path)
+    loaded = _load_current_holdings(path=path)
+
+    assert len(loaded) == 1
+    assert loaded[0][0] == "first.png"
+    assert loaded[0][1].source == "first.png"
+    assert json.loads(loaded[0][2])["holdings"] == []
+
+
+def test_save_current_holdings_replaces_existing_file(tmp_path: Path):
+    path = tmp_path / "current_holdings.json"
+    first = _make_fake_snapshot("first.png")
+    second = _make_fake_snapshot("second.png")
+
+    _save_current_holdings([("first.png", first, first.model_dump_json())], path=path)
+    _save_current_holdings([("second.png", second, second.model_dump_json())], path=path)
+
+    loaded = _load_current_holdings(path=path)
+    assert [name for name, _, _ in loaded] == ["second.png"]
+
+
+def test_clear_current_holdings_removes_saved_file(tmp_path: Path):
+    path = tmp_path / "current_holdings.json"
+    snap = _make_fake_snapshot("first.png")
+    _save_current_holdings([("first.png", snap, snap.model_dump_json())], path=path)
+
+    _clear_current_holdings(path=path)
+
+    assert _load_current_holdings(path=path) == []
+    assert not path.exists()
+
+
+def test_load_current_holdings_returns_empty_for_invalid_file(tmp_path: Path):
+    path = tmp_path / "current_holdings.json"
+    path.write_text("{not-json", encoding="utf-8")
+
+    assert _load_current_holdings(path=path) == []

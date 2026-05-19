@@ -6,6 +6,7 @@ from views.fear_greed import (
     _bar_color,
     _fetch_fng_raw,
     _korean_label,
+    _market_status_summary,
     _metric_delta,
     _metric_value,
 )
@@ -116,3 +117,19 @@ def test_metric_delta_prior_zero_does_not_fallthrough_to_none():
 
 def test_metric_delta_none_prior_returns_none():
     assert _metric_delta(50, None) is None
+
+
+def test_market_status_summary_combines_fng_and_worst_drawdown():
+    data = [{"value": "23", "value_classification": "Extreme Fear"}]
+    rows = [{"티커": "NVDA", "오늘 하락률": -31.25}]
+
+    summary = _market_status_summary(data, rows)
+
+    assert "극도의 공포 23점" in summary
+    assert "NVDA -31.25%" in summary
+
+
+def test_market_status_summary_handles_empty_state():
+    summary = _market_status_summary([], [])
+
+    assert "오늘 상태를 한 줄로 요약" in summary

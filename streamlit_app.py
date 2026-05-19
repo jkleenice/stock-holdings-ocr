@@ -46,7 +46,8 @@ _require_password()
 # 사이드바에서 기능 선택
 FEATURES = {
     "📊 보유종목": "holdings",
-    "😱 코인 공포·탐욕 지수": "fear_greed",
+    "🎬 유튜브 자막 추출": "youtube",
+    "😱 시장 심리·하락률": "fear_greed",
     "📈 변동성 지수 (준비 중)": "vix",
 }
 
@@ -66,6 +67,10 @@ if feature_id == "holdings":
     from views import holdings
 
     holdings.render()
+elif feature_id == "youtube":
+    from views import youtube
+
+    youtube.render()
 elif feature_id == "fear_greed":
     from views import fear_greed
 
