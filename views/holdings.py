@@ -9,16 +9,28 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import altair as alt
 import openai
 import pandas as pd
 import streamlit as st
 
-from holdings_ocr.categorizer import categorize, category_pnl_summary, category_totals
+from holdings_ocr.categorizer import (
+    categorize,
+    category_pnl_summary,
+    category_totals,
+    load_categories,
+)
 from holdings_ocr.extractor import EXTRACTION_PROMPT, MODEL, extract_from_image
+from holdings_ocr.normalizer import (
+    _normalize_raw_name,
+    load_issuer_aliases,
+    load_korean_name_aliases,
+    resolve_issuer,
+)
 from holdings_ocr.reporter import build_report, render_markdown
-from holdings_ocr.schemas import HoldingsSnapshot
+from holdings_ocr.schemas import Holding, HoldingsSnapshot
 
 # Cache invalidates automatically when the extraction prompt changes.
 PROMPT_FINGERPRINT = hashlib.sha256(EXTRACTION_PROMPT.encode("utf-8")).hexdigest()[:16]
@@ -27,6 +39,8 @@ PROMPT_FINGERPRINT = hashlib.sha256(EXTRACTION_PROMPT.encode("utf-8")).hexdigest
 # within the container lifetime. Gitignored — never committed to a public repo.
 CACHE_DIR = Path(".cache/holdings-ocr/snapshots")
 CURRENT_HOLDINGS_FILE = Path(".cache/holdings-ocr/current_holdings.json")
+USER_CATEGORY_RULES_FILE = Path(".cache/holdings-ocr/category_overrides.json")
+USER_CATEGORY_RULES_VERSION = 1
 
 
 def _content_hash(image_bytes: bytes, model_id: str, prompt_fp: str) -> str:
@@ -122,6 +136,304 @@ def _load_current_holdings(
 
 def _clear_current_holdings(path: Path = CURRENT_HOLDINGS_FILE) -> None:
     path.unlink(missing_ok=True)
+
+
+def _holding_category_keys(
+    holding: Holding,
+    *,
+    aliases: dict[str, str] | None = None,
+    korean_names: dict[str, str] | None = None,
+) -> list[str]:
+    aliases = aliases if aliases is not None else load_issuer_aliases()
+    korean_names = korean_names if korean_names is not None else load_korean_name_aliases()
+
+    keys: list[str] = []
+    issuer_key = _normalize_raw_name(resolve_issuer(holding, aliases, korean_names))
+    if issuer_key:
+        keys.append(issuer_key)
+    if holding.symbol:
+        symbol_key = _normalize_raw_name(holding.symbol)
+        if symbol_key and symbol_key not in keys:
+            keys.append(symbol_key)
+    raw_name_key = _normalize_raw_name(holding.raw_name)
+    if raw_name_key and raw_name_key not in keys:
+        keys.append(raw_name_key)
+    return keys
+
+
+def _load_user_category_rules(path: Path = USER_CATEGORY_RULES_FILE) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+
+    raw_rules = payload.get("rules") if isinstance(payload, dict) else None
+    if not isinstance(raw_rules, list):
+        return []
+
+    rules: list[dict[str, Any]] = []
+    for item in raw_rules:
+        if not isinstance(item, dict):
+            continue
+
+        category = str(item.get("category") or "").strip()
+        raw_name = str(item.get("raw_name") or "").strip()
+        symbol_value = item.get("symbol")
+        symbol = str(symbol_value).strip() if symbol_value else None
+        keys_value = item.get("keys")
+        keys: list[str] = []
+        if isinstance(keys_value, list):
+            for key in keys_value:
+                normalized = _normalize_raw_name(str(key))
+                if normalized and normalized not in keys:
+                    keys.append(normalized)
+
+        if not keys and symbol:
+            keys.append(_normalize_raw_name(symbol))
+        if raw_name:
+            raw_name_key = _normalize_raw_name(raw_name)
+            if raw_name_key and raw_name_key not in keys:
+                keys.append(raw_name_key)
+
+        if not category or not keys:
+            continue
+
+        rules.append({
+            "raw_name": raw_name or keys[0],
+            "symbol": symbol,
+            "category": category,
+            "keys": keys,
+        })
+    return rules
+
+
+def _save_user_category_rules(
+    rules: list[dict[str, Any]],
+    path: Path = USER_CATEGORY_RULES_FILE,
+) -> None:
+    payload = {
+        "version": USER_CATEGORY_RULES_VERSION,
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "rules": rules,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _user_category_mapping(rules: list[dict[str, Any]]) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for rule in rules:
+        category = str(rule.get("category") or "").strip()
+        keys = rule.get("keys")
+        if not category or not isinstance(keys, list):
+            continue
+        for key in keys:
+            normalized = _normalize_raw_name(str(key))
+            if normalized:
+                mapping[normalized] = category
+    return mapping
+
+
+def _category_options(
+    base_categories: dict[str, str],
+    user_categories: dict[str, str],
+) -> list[str]:
+    options: list[str] = []
+    seen: set[str] = set()
+    for category in [*base_categories.values(), *user_categories.values()]:
+        if category not in seen:
+            options.append(category)
+            seen.add(category)
+    return options
+
+
+def _upsert_user_category_rule(
+    rules: list[dict[str, Any]],
+    *,
+    raw_name: str,
+    symbol: str | None,
+    category: str,
+    keys: list[str],
+) -> list[dict[str, Any]]:
+    normalized_keys: list[str] = []
+    for key in keys:
+        normalized = _normalize_raw_name(key)
+        if normalized and normalized not in normalized_keys:
+            normalized_keys.append(normalized)
+
+    if not normalized_keys or not category.strip():
+        return rules
+
+    key_set = set(normalized_keys)
+    kept_rules = []
+    for rule in rules:
+        rule_keys = rule.get("keys")
+        if not isinstance(rule_keys, list):
+            kept_rules.append(rule)
+            continue
+        if not key_set.intersection(_normalize_raw_name(str(key)) for key in rule_keys):
+            kept_rules.append(rule)
+    kept_rules.append({
+        "raw_name": raw_name,
+        "symbol": symbol,
+        "category": category.strip(),
+        "keys": normalized_keys,
+    })
+    return kept_rules
+
+
+def _category_rule_id(keys: list[str]) -> str:
+    key_material = "|".join(keys)
+    return hashlib.sha256(key_material.encode("utf-8")).hexdigest()[:12]
+
+
+def _append_unique(values: list[str], value: str | None) -> None:
+    if value and value not in values:
+        values.append(value)
+
+
+def _group_uncategorized_holdings(holdings: list[Holding]) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    aliases = load_issuer_aliases()
+    korean_names = load_korean_name_aliases()
+    for holding in holdings:
+        keys = _holding_category_keys(
+            holding,
+            aliases=aliases,
+            korean_names=korean_names,
+        )
+        group_id = _category_rule_id(keys[:1])
+        group = grouped.setdefault(
+            group_id,
+            {
+                "id": group_id,
+                "raw_names": [],
+                "symbols": [],
+                "keys": [],
+                "count": 0,
+                "market_value": Decimal(0),
+            },
+        )
+        _append_unique(group["raw_names"], holding.raw_name)
+        _append_unique(group["symbols"], holding.symbol.upper() if holding.symbol else None)
+        for key in keys:
+            _append_unique(group["keys"], key)
+        group["count"] += 1
+        if holding.market_value is not None:
+            group["market_value"] += holding.market_value
+
+    targets = list(grouped.values())
+    targets.sort(key=lambda target: target["market_value"], reverse=True)
+    return targets
+
+
+def _render_uncategorized_classifier(
+    uncategorized: list[Holding],
+    category_options: list[str],
+) -> None:
+    if not uncategorized:
+        return
+
+    targets = _group_uncategorized_holdings(uncategorized)
+    with st.expander(f"⚠️  분류되지 않은 {len(uncategorized)}개 종목", expanded=True):
+        st.caption("테마를 저장하면 같은 종목은 다음 화면부터 자동으로 분류됩니다.")
+        with st.form("uncategorized_category_form"):
+            assignments: list[dict[str, Any]] = []
+            for target in targets:
+                raw_names = ", ".join(target["raw_names"])
+                symbols = ", ".join(target["symbols"])
+                display_name = f"{raw_names} ({symbols})" if symbols else raw_names
+                left, middle, right = st.columns([3, 2, 2])
+                left.markdown(f"**{display_name}**")
+                left.caption(f"{target['count']}개 · {_format_money(target['market_value'])}")
+                selected_category = middle.selectbox(
+                    "기존 테마",
+                    options=["분류 안 함", *category_options],
+                    key=f"category_select_{target['id']}",
+                )
+                new_category = right.text_input(
+                    "새 테마",
+                    key=f"category_new_{target['id']}",
+                )
+                assignments.append({
+                    "target": target,
+                    "selected_category": selected_category,
+                    "new_category": new_category,
+                })
+
+            submitted = st.form_submit_button("선택한 분류 저장", type="primary")
+
+        if submitted:
+            rules = _load_user_category_rules()
+            saved_count = 0
+            for assignment in assignments:
+                target = assignment["target"]
+                selected_category = str(assignment["selected_category"])
+                new_category = str(assignment["new_category"]).strip()
+                category = new_category or (
+                    selected_category if selected_category != "분류 안 함" else ""
+                )
+                if not category:
+                    continue
+
+                rules = _upsert_user_category_rule(
+                    rules,
+                    raw_name=str(target["raw_names"][0]),
+                    symbol=str(target["symbols"][0]) if target["symbols"] else None,
+                    category=category,
+                    keys=list(target["keys"]),
+                )
+                saved_count += 1
+
+            if saved_count:
+                if not _save_user_category_rules_or_warn(rules):
+                    return
+                st.session_state["category_rules_message"] = (
+                    f"{saved_count}개 종목 분류를 저장했어요."
+                )
+                st.rerun()
+            else:
+                st.warning("저장할 분류를 선택해주세요.")
+
+
+def _save_user_category_rules_or_warn(rules: list[dict[str, Any]]) -> bool:
+    try:
+        _save_user_category_rules(rules)
+    except OSError as exc:
+        st.warning("사용자 분류 규칙을 저장하지 못했어요.")
+        st.caption(str(exc))
+        return False
+    return True
+
+
+def _render_user_category_rules(rules: list[dict[str, Any]]) -> None:
+    if not rules:
+        return
+
+    with st.expander(f"사용자 분류 규칙 {len(rules)}개"):
+        for idx, rule in enumerate(rules):
+            raw_name = str(rule.get("raw_name") or "")
+            symbol = str(rule.get("symbol") or "")
+            category = str(rule.get("category") or "")
+            display_name = f"{raw_name} ({symbol})" if symbol else raw_name
+            left, right = st.columns([5, 1])
+            left.write(f"{display_name} → {category}")
+            rule_keys = rule.get("keys")
+            rule_key_id = _category_rule_id(rule_keys if isinstance(rule_keys, list) else [])
+            if right.button("삭제", key=f"delete_category_rule_{idx}_{rule_key_id}"):
+                updated_rules = [r for i, r in enumerate(rules) if i != idx]
+                if not _save_user_category_rules_or_warn(updated_rules):
+                    return
+                st.session_state["category_rules_message"] = "사용자 분류 규칙을 삭제했어요."
+                st.rerun()
+
+        if st.button("전체 삭제", key="delete_all_category_rules"):
+            if not _save_user_category_rules_or_warn([]):
+                return
+            st.session_state["category_rules_message"] = "사용자 분류 규칙을 모두 삭제했어요."
+            st.rerun()
 
 
 @st.cache_data(show_spinner=False)
@@ -291,10 +603,22 @@ def render() -> None:
     st.subheader("테마별로 보기")
 
     try:
-        cat_buckets, uncategorized = categorize(all_holdings)
+        base_categories = load_categories()
+        user_category_rules = _load_user_category_rules()
+        user_categories = _user_category_mapping(user_category_rules)
+        effective_categories = {**base_categories, **user_categories}
+        cat_buckets, uncategorized = categorize(
+            all_holdings,
+            categories=effective_categories,
+        )
     except ValueError as exc:
         st.error(f"카테고리 정의 오류: {exc}")
         return
+
+    category_rules_message = st.session_state.get("category_rules_message")
+    if category_rules_message:
+        st.success(category_rules_message)
+        del st.session_state["category_rules_message"]
 
     totals = category_totals(cat_buckets)
     pnl_summary = category_pnl_summary(cat_buckets)
@@ -537,10 +861,11 @@ def render() -> None:
     else:
         st.info("분류된 종목이 없어요")
 
-    if uncategorized:
-        with st.expander(f"⚠️  분류되지 않은 {len(uncategorized)}개 종목"):
-            for h in uncategorized:
-                st.text(f"• {h.raw_name}  ({_format_money(h.market_value)})")
+    _render_uncategorized_classifier(
+        uncategorized,
+        _category_options(base_categories, user_categories),
+    )
+    _render_user_category_rules(user_category_rules)
 
     # ── 통합 표 ─────────────────────────────────────────────────────
     st.subheader("전체 종목")
