@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -111,6 +111,15 @@ def _fng_history_df(data: list[dict]) -> pd.DataFrame:
     ])
 
 
+def _fng_item_date(item: dict) -> date:
+    return datetime.fromtimestamp(int(item["timestamp"])).date()
+
+
+def _fng_history_as_of(data: list[dict], as_of_date: date) -> list[dict]:
+    sorted_data = sorted(data, key=lambda item: int(item["timestamp"]), reverse=True)
+    return [item for item in sorted_data if _fng_item_date(item) <= as_of_date]
+
+
 def _get_fng_at(data: list[dict], idx: int) -> int | None:
     if idx >= len(data):
         return None
@@ -118,9 +127,9 @@ def _get_fng_at(data: list[dict], idx: int) -> int | None:
 
 
 def _render_fng_panel(data: list[dict]) -> None:
-    st.subheader("코인 공포·탐욕")
+    st.subheader("기준일 코인 공포·탐욕")
     if not data:
-        st.warning("지금은 공포·탐욕 지수 데이터가 없어요")
+        st.warning("기준일에 사용할 공포·탐욕 지수 데이터가 없어요")
         return
 
     current = data[0]
@@ -139,17 +148,20 @@ def _render_fng_panel(data: list[dict]) -> None:
             col.metric(label, past, value - past)
 
     c1, c2, c3 = st.columns(3)
-    _safe_metric(c1, "어제", _get_fng_at(data, 1))
-    _safe_metric(c2, "지난주", _get_fng_at(data, 7))
-    _safe_metric(c3, "한 달 전", _get_fng_at(data, 29))
-    st.caption("공포·탐욕 지수는 손익과 무관한 시장 심리 지표예요")
+    _safe_metric(c1, "전일", _get_fng_at(data, 1))
+    _safe_metric(c2, "7일 전", _get_fng_at(data, 7))
+    _safe_metric(c3, "30일 전", _get_fng_at(data, 29))
+    st.caption(
+        f"지표 기준일: {_fng_item_date(current).isoformat()} · "
+        "공포·탐욕 지수는 손익과 무관한 시장 심리 지표예요"
+    )
 
 
 def _render_fng_history(data: list[dict]) -> None:
     if not data:
         return
 
-    with st.expander("공포·탐욕 30일 추이"):
+    with st.expander("공포·탐욕 기준일 이전 30개 추이"):
         df = _fng_history_df(data)
         st.line_chart(df.set_index("날짜")["지수"], height=240)
         st.dataframe(
@@ -168,32 +180,40 @@ def _market_status_summary(data: list[dict], drawdown_rows: list[dict]) -> str:
         parts.append(f"코인 심리는 {_korean_label(current['value_classification'])} {value}점")
     if drawdown_rows:
         worst = drawdown_rows[0]
-        worst_amount = max(0.0, -worst["오늘 하락률"])
+        worst_amount = max(0.0, -worst["기준일 하락률"])
         parts.append(f"가장 많이 빠진 티커는 {worst['티커']} -{worst_amount:.2f}%")
     if not parts:
-        return "공포·탐욕 지수 또는 추적 티커를 불러오면 오늘 상태를 한 줄로 요약해요."
+        return "공포·탐욕 지수 또는 추적 티커를 불러오면 기준일 상태를 한 줄로 요약해요."
     return " · ".join(parts)
 
 
 def render() -> None:
     st.title("😱 시장 심리·고점 대비 하락률")
-    st.caption("코인 공포·탐욕 지수와 저장한 티커들의 최고점 대비 하락률을 한 화면에서 봅니다")
+    st.caption("코인 공포·탐욕 지수와 저장한 티커들의 기준일 최고점 대비 하락률을 한 화면에서 봅니다")
 
     from views import drawdown
 
+    tracked, period, as_of_date = drawdown.render_drawdown_controls(
+        key_prefix="market_drawdown",
+        show_period=False,
+    )
+
     try:
-        data = _fetch_fng(limit=30)
+        data = _fng_history_as_of(_fetch_fng(limit=0), as_of_date)
     except Exception:
         st.error("잠시 후 다시 시도해주세요. 지수 서버에 일시적으로 연결되지 않아요.")
         data = []
 
-    tracked, period = drawdown.render_drawdown_controls(key_prefix="market_drawdown")
     rows: list[dict] = []
     failures: list[tuple[str, str]] = []
     if tracked:
-        st.caption("추적 중: " + ", ".join(f"`{ticker}`" for ticker in tracked))
+        st.caption(
+            f"기준일: {as_of_date.isoformat()} · "
+            + "추적 중: "
+            + ", ".join(f"`{ticker}`" for ticker in tracked)
+        )
         with st.spinner("추적 티커 가격을 불러오는 중..."):
-            rows, failures = drawdown.load_drawdown_rows(tracked, period)
+            rows, failures = drawdown.load_drawdown_rows(tracked, period, as_of_date)
 
     st.info(_market_status_summary(data, rows))
 
@@ -212,4 +232,4 @@ def render() -> None:
         st.info("추적 티커를 저장하면 전체 하락률 게이지가 여기에 표시됩니다.")
         st.caption("예: AAPL, MSFT, NVDA, QQQ, BTC-USD, 005930.KS")
 
-    _render_fng_history(data)
+    _render_fng_history(data[:30])

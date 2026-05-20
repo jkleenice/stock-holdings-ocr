@@ -53,6 +53,7 @@ def test_compute_drawdown_stats_uses_period_peak_and_current_price():
     stats = compute_drawdown_stats(prices)
 
     assert stats.current_price == pytest.approx(120.0)
+    assert stats.current_date == pd.Timestamp("2024-01-03")
     assert stats.peak_price == pytest.approx(150.0)
     assert stats.peak_date == pd.Timestamp("2024-01-02")
     assert stats.drawdown_pct == pytest.approx(-20.0)
@@ -69,6 +70,50 @@ def test_compute_drawdown_stats_ignores_nan_and_non_positive_prices():
 
     assert stats.peak_price == pytest.approx(100.0)
     assert stats.drawdown_pct == pytest.approx(-20.0)
+
+
+def test_compute_drawdown_stats_uses_as_of_date_price_and_prior_peak():
+    prices = pd.Series(
+        [100.0, 150.0, 120.0, 180.0, 90.0],
+        index=pd.to_datetime([
+            "2024-01-01",
+            "2024-01-02",
+            "2024-01-03",
+            "2024-01-04",
+            "2024-01-05",
+        ]),
+    )
+
+    stats = compute_drawdown_stats(prices, as_of_date="2024-01-03")
+
+    assert stats.current_price == pytest.approx(120.0)
+    assert stats.current_date == pd.Timestamp("2024-01-03")
+    assert stats.peak_price == pytest.approx(150.0)
+    assert stats.peak_date == pd.Timestamp("2024-01-02")
+    assert stats.drawdown_pct == pytest.approx(-20.0)
+
+
+def test_compute_drawdown_stats_uses_last_price_before_as_of_date():
+    prices = pd.Series(
+        [100.0, 150.0],
+        index=pd.to_datetime(["2024-01-01", "2024-01-03"]),
+    )
+
+    stats = compute_drawdown_stats(prices, as_of_date="2024-01-02")
+
+    assert stats.current_price == pytest.approx(100.0)
+    assert stats.current_date == pd.Timestamp("2024-01-01")
+    assert stats.drawdown_pct == pytest.approx(0.0)
+
+
+def test_compute_drawdown_stats_raises_when_no_price_exists_before_as_of_date():
+    prices = pd.Series(
+        [100.0],
+        index=pd.to_datetime(["2024-01-02"]),
+    )
+
+    with pytest.raises(ValueError, match="price series is empty"):
+        compute_drawdown_stats(prices, as_of_date="2024-01-01")
 
 
 def test_compute_drawdown_stats_raises_for_empty_prices():

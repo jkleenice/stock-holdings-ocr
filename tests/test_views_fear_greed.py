@@ -1,3 +1,4 @@
+from datetime import date, datetime
 from unittest.mock import MagicMock
 
 import pytest
@@ -5,6 +6,7 @@ import pytest
 from views.fear_greed import (
     _bar_color,
     _fetch_fng_raw,
+    _fng_history_as_of,
     _korean_label,
     _market_status_summary,
     _metric_delta,
@@ -92,6 +94,39 @@ def test_fetch_fng_raw_raises_on_http_error(monkeypatch):
         _fetch_fng_raw(limit=1)
 
 
+def _fng_item(value: str, day: str) -> dict:
+    timestamp = int(datetime.strptime(day, "%Y-%m-%d").timestamp())
+    return {
+        "value": value,
+        "value_classification": "Fear",
+        "timestamp": str(timestamp),
+    }
+
+
+def test_fng_history_as_of_uses_exact_matching_date_first():
+    data = [
+        _fng_item("50", "2024-01-03"),
+        _fng_item("40", "2024-01-02"),
+        _fng_item("30", "2024-01-01"),
+    ]
+
+    result = _fng_history_as_of(data, date(2024, 1, 3))
+
+    assert [item["value"] for item in result] == ["50", "40", "30"]
+
+
+def test_fng_history_as_of_falls_back_to_previous_date():
+    data = [
+        _fng_item("60", "2024-01-05"),
+        _fng_item("40", "2024-01-03"),
+        _fng_item("20", "2024-01-01"),
+    ]
+
+    result = _fng_history_as_of(data, date(2024, 1, 4))
+
+    assert [item["value"] for item in result] == ["40", "20"]
+
+
 def test_metric_value_preserves_zero():
     """Critical: 0 (Extreme Fear bottom) must not be replaced by em-dash."""
     assert _metric_value(0) == 0
@@ -121,7 +156,7 @@ def test_metric_delta_none_prior_returns_none():
 
 def test_market_status_summary_combines_fng_and_worst_drawdown():
     data = [{"value": "23", "value_classification": "Extreme Fear"}]
-    rows = [{"티커": "NVDA", "오늘 하락률": -31.25}]
+    rows = [{"티커": "NVDA", "기준일 하락률": -31.25}]
 
     summary = _market_status_summary(data, rows)
 
@@ -132,4 +167,4 @@ def test_market_status_summary_combines_fng_and_worst_drawdown():
 def test_market_status_summary_handles_empty_state():
     summary = _market_status_summary([], [])
 
-    assert "오늘 상태를 한 줄로 요약" in summary
+    assert "기준일 상태를 한 줄로 요약" in summary
