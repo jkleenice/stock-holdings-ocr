@@ -5,90 +5,32 @@ from datetime import date
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-import yfinance as yf
 
 from holdings_ocr.drawdown import (
     TRACKED_TICKERS_SESSION_KEY,
-    compute_drawdown_stats,
     load_tracked_tickers,
     parse_ticker_input,
     save_tracked_tickers,
-    to_yfinance_symbol,
 )
-
-
-PERIOD_LABELS = {
-    "1y": "최근 1년",
-    "3y": "최근 3년",
-    "5y": "최근 5년",
-    "max": "전체 기간",
-}
+from holdings_ocr.drawdown_service import (
+    PERIOD_LABELS,
+    build_drawdown_rows,
+    drawdown_amount,
+    drawdown_color,
+    drawdown_label,
+    fetch_close_prices_raw,
+    format_price,
+)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def _fetch_close_prices(yf_symbol: str, period: str) -> pd.Series:
-    df = yf.download(
-        yf_symbol,
-        period=period,
-        auto_adjust=True,
-        progress=False,
-        threads=False,
-    )
-    return _extract_close_series(df)
-
-
-def _extract_close_series(df: pd.DataFrame | None) -> pd.Series:
-    if df is None or df.empty:
-        return pd.Series(dtype=float)
-
-    if isinstance(df.columns, pd.MultiIndex):
-        close_col = next((col for col in df.columns if col[0] == "Close"), None)
-        if close_col is None:
-            return pd.Series(dtype=float)
-        close = df[close_col]
-    else:
-        if "Close" not in df.columns:
-            return pd.Series(dtype=float)
-        close = df["Close"]
-
-    return pd.to_numeric(close, errors="coerce").dropna()
-
-
-def _format_price(value: float) -> str:
-    if value >= 1000:
-        return f"{value:,.0f}"
-    if value >= 10:
-        return f"{value:,.2f}"
-    return f"{value:,.4f}"
-
-
-def _drawdown_amount(drawdown_pct: float) -> float:
-    return max(0.0, -drawdown_pct)
-
-
-def _drawdown_color(drawdown_amount: float) -> str:
-    if drawdown_amount < 5:
-        return "#2ca02c"
-    if drawdown_amount < 15:
-        return "#e9c46a"
-    if drawdown_amount < 30:
-        return "#f4a261"
-    return "#e45756"
-
-
-def _drawdown_label(drawdown_amount: float) -> str:
-    if drawdown_amount < 5:
-        return "고점 근처"
-    if drawdown_amount < 15:
-        return "약한 조정"
-    if drawdown_amount < 30:
-        return "중간 조정"
-    return "큰 하락"
+    return fetch_close_prices_raw(yf_symbol, period)
 
 
 def _gauge_figure(row: dict) -> go.Figure:
-    amount = _drawdown_amount(row["기준일 하락률"])
-    color = _drawdown_color(amount)
+    amount = drawdown_amount(row["기준일 하락률"])
+    color = drawdown_color(amount)
     fig = go.Figure(
         go.Indicator(
             mode="gauge+number",
@@ -98,7 +40,7 @@ def _gauge_figure(row: dict) -> go.Figure:
                 "text": (
                     f"<b>{row['티커']}</b><br>"
                     f"<span style='font-size:0.72em;color:#6b7280'>"
-                    f"{_drawdown_label(amount)} · 고점 {row['고점 날짜']}"
+                    f"{drawdown_label(amount)} · 고점 {row['고점 날짜']}"
                     "</span>"
                 ),
                 "font": {"size": 17},
@@ -180,7 +122,7 @@ def render_drawdown_controls(
                 placeholder="AAPL\nMSFT\nNVDA\nQQQ\nBTC-USD",
                 help="쉼표, 공백, 줄바꿈으로 여러 티커를 입력할 수 있어요. 005930처럼 6자리 숫자는 005930.KS로 조회합니다.",
             )
-            saved = st.form_submit_button("저장", type="primary", use_container_width=True)
+            saved = st.form_submit_button("저장", type="primary", width="stretch")
 
         if saved:
             parsed = parse_ticker_input(ticker_text)
@@ -189,7 +131,7 @@ def render_drawdown_controls(
             _fetch_close_prices.clear()
             st.rerun()
 
-        if st.button("가격 새로고침", use_container_width=True, key=f"{key_prefix}_refresh"):
+        if st.button("가격 새로고침", width="stretch", key=f"{key_prefix}_refresh"):
             _fetch_close_prices.clear()
             st.rerun()
 
@@ -201,33 +143,12 @@ def load_drawdown_rows(
     period: str,
     as_of_date: date | str | pd.Timestamp | None = None,
 ) -> tuple[list[dict], list[tuple[str, str]]]:
-    rows: list[dict] = []
-    failures: list[tuple[str, str]] = []
-
-    for ticker in tracked:
-        yf_symbol = to_yfinance_symbol(ticker)
-        try:
-            close = _fetch_close_prices(yf_symbol, period)
-            stats = compute_drawdown_stats(close, as_of_date=as_of_date)
-        except Exception as exc:  # noqa: BLE001
-            failures.append((ticker, str(exc)))
-            continue
-
-        rows.append(
-            {
-                "티커": ticker,
-                "조회 티커": yf_symbol,
-                "기준가": stats.current_price,
-                "기준가 날짜": stats.current_date.date().isoformat(),
-                "고점": stats.peak_price,
-                "고점 날짜": stats.peak_date.date().isoformat(),
-                "기준일 하락률": stats.drawdown_pct,
-                "회복 필요 상승률": stats.recovery_pct,
-            }
-        )
-
-    rows.sort(key=lambda row: _drawdown_amount(row["기준일 하락률"]), reverse=True)
-    return rows, failures
+    return build_drawdown_rows(
+        tracked,
+        period,
+        as_of_date,
+        fetch_close_prices=_fetch_close_prices,
+    )
 
 
 def render_drawdown_top3(rows: list[dict]) -> None:
@@ -237,7 +158,7 @@ def render_drawdown_top3(rows: list[dict]) -> None:
         return
 
     for rank, row in enumerate(rows[:3], start=1):
-        amount = _drawdown_amount(row["기준일 하락률"])
+        amount = drawdown_amount(row["기준일 하락률"])
         st.markdown(f"**{rank}. {row['티커']}**")
         st.progress(
             min(amount / 80, 1.0),
@@ -247,8 +168,8 @@ def render_drawdown_top3(rows: list[dict]) -> None:
             ),
         )
         st.caption(
-            f"기준가 {_format_price(row['기준가'])} ({row['기준가 날짜']}) · "
-            f"고점 {_format_price(row['고점'])} ({row['고점 날짜']})"
+            f"기준가 {format_price(row['기준가'])} ({row['기준가 날짜']}) · "
+            f"고점 {format_price(row['고점'])} ({row['고점 날짜']})"
         )
 
 
@@ -264,12 +185,12 @@ def render_drawdown_gauges(rows: list[dict]) -> None:
             with col.container(border=True):
                 st.plotly_chart(
                     _gauge_figure(row),
-                    use_container_width=True,
+                    width="stretch",
                     config={"displayModeBar": False},
                 )
                 st.caption(
-                    f"기준가 {_format_price(row['기준가'])} ({row['기준가 날짜']}) · "
-                    f"고점 {_format_price(row['고점'])} · "
+                    f"기준가 {format_price(row['기준가'])} ({row['기준가 날짜']}) · "
+                    f"고점 {format_price(row['고점'])} · "
                     f"회복 필요 +{row['회복 필요 상승률']:.2f}%"
                 )
 
@@ -282,7 +203,7 @@ def render_drawdown_table(rows: list[dict]) -> None:
         df = pd.DataFrame(rows)
         st.dataframe(
             df,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "기준가": st.column_config.NumberColumn("기준가", format="%.4f"),

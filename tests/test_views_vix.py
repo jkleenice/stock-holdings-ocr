@@ -2,10 +2,11 @@ import pandas as pd
 import pytest
 
 import views.vix as vix_module
-from views.vix import (
-    _first_trading_days_of_month,
-    _range_scale,
+from holdings_ocr.vix_strategy import (
+    build_vix_comparison_view_model,
     compute_cagr,
+    first_trading_days_of_month,
+    range_scale,
     simulate_dca,
     simulate_vix_lumpsum,
 )
@@ -26,18 +27,18 @@ def test_vix_module_exports_render_callable():
 
 def test_first_trading_days_picks_one_per_month():
     prices = _constant_prices()
-    firsts = _first_trading_days_of_month(prices.index)
+    firsts = first_trading_days_of_month(prices.index)
     assert len(firsts) == 12
 
 
 def test_first_trading_days_empty_input():
     empty = pd.DatetimeIndex([])
-    assert len(_first_trading_days_of_month(empty)) == 0
+    assert len(first_trading_days_of_month(empty)) == 0
 
 
 def test_first_trading_days_picks_earliest_in_month():
     prices = _constant_prices(start="2024-01-15", end="2024-03-31")
-    firsts = _first_trading_days_of_month(prices.index)
+    firsts = first_trading_days_of_month(prices.index)
     assert firsts[0] == pd.Timestamp("2024-01-15")
     assert firsts[1] == pd.Timestamp("2024-02-01")
     assert firsts[2] == pd.Timestamp("2024-03-01")
@@ -177,12 +178,32 @@ def test_compute_cagr_handles_loss():
 
 def test_range_scale_maps_min_to_zero_and_max_to_hundred():
     s = pd.Series([10.0, 20.0, 30.0, 40.0])
-    scaled = _range_scale(s)
+    scaled = range_scale(s)
     assert scaled.iloc[0] == pytest.approx(0.0)
     assert scaled.iloc[-1] == pytest.approx(100.0)
 
 
 def test_range_scale_constant_series_returns_fifty():
     s = pd.Series([5.0, 5.0, 5.0])
-    scaled = _range_scale(s)
+    scaled = range_scale(s)
     assert all(v == 50.0 for v in scaled)
+
+
+def test_build_vix_comparison_view_model_prepares_chart_rows():
+    prices = _constant_prices(price=100.0)
+    vix = pd.Series([15.0] * len(prices), index=prices.index)
+
+    view_model = build_vix_comparison_view_model(
+        ticker="SPY",
+        prices=prices,
+        vix=vix,
+        monthly_amount=100.0,
+        vix_threshold=30.0,
+    )
+
+    assert view_model.ticker == "SPY"
+    assert view_model.dca.buy_count == 12
+    assert view_model.vix_strategy.buy_count == 0
+    assert view_model.normalized_rows[0]["시리즈"] == "SPY 가격"
+    assert view_model.portfolio_rows[0]["전략"] == "매월 매수"
+    assert view_model.cash_rows[-1]["현금($)"] == pytest.approx(1200.0)

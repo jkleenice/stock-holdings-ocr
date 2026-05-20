@@ -23,6 +23,7 @@ from holdings_ocr.youtube import (
     save_note_markdown,
     summarize_transcript,
 )
+from holdings_ocr.youtube_service import build_youtube_note_view_model, download_filename
 
 
 def _video() -> YoutubeVideoInfo:
@@ -164,6 +165,36 @@ def test_save_note_markdown_accepts_directory_output(tmp_path: Path):
 
     assert path.name == "GPT_검색_자동화.md"
     assert path.read_text(encoding="utf-8").rstrip().endswith("자막 원문")
+
+
+def test_youtube_note_view_model_prepares_streamlit_display_data():
+    note = YoutubeNote(
+        video=_video(),
+        transcript="자막 원문",
+        summary=YoutubeSummary(
+            problem="문제",
+            method="방법",
+            effect="효과",
+            keywords=["GPT", "검색"],
+            category="llm",
+            model="gpt-4o-mini",
+        ),
+    )
+
+    view_model = build_youtube_note_view_model(note)
+
+    assert view_model.title == "GPT 검색 자동화"
+    assert view_model.download_filename == "GPT_검색_자동화.md"
+    assert view_model.transcript_length == 5
+    assert view_model.has_summary is True
+    assert view_model.summary_keywords == ["GPT", "검색"]
+    assert "## 요약" in view_model.markdown
+
+
+def test_download_filename_sanitizes_video_title():
+    note = YoutubeNote(video=_video(), transcript="자막 원문")
+
+    assert download_filename(note) == "GPT_검색_자동화.md"
 
 
 def test_summarize_transcript_normalizes_payload_and_classifies_category():

@@ -7,10 +7,9 @@ import streamlit as st
 from holdings_ocr.youtube import (
     YoutubeExtractionError,
     YoutubeNote,
-    build_markdown,
     extract_youtube_note,
-    sanitize_filename,
 )
+from holdings_ocr.youtube_service import build_youtube_note_view_model
 
 
 @st.cache_data(show_spinner=False)
@@ -21,10 +20,6 @@ def _extract_cached(url: str, language: str, summarize: bool, model: str) -> You
         summarize=summarize,
         summary_model=model,
     )
-
-
-def _download_filename(note: YoutubeNote) -> str:
-    return f"{sanitize_filename(note.video.title)}.md"
 
 
 def render() -> None:
@@ -51,7 +46,7 @@ def render() -> None:
         "유튜브 URL",
         placeholder="https://www.youtube.com/watch?v=...",
     )
-    run = st.button("추출", type="primary", use_container_width=True)
+    run = st.button("추출", type="primary", width="stretch")
 
     if run:
         if not url.strip():
@@ -82,36 +77,35 @@ def render() -> None:
         st.info("URL을 입력하고 추출을 누르면 자막과 Markdown을 확인할 수 있어요.")
         return
 
-    markdown = build_markdown(note)
-    video = note.video
+    view_model = build_youtube_note_view_model(note)
 
-    st.subheader(video.title)
+    st.subheader(view_model.title)
     c1, c2, c3 = st.columns(3)
-    c1.metric("채널", video.channel)
-    c2.metric("업로드", video.upload_date or "-")
-    c3.metric("자막 길이", f"{len(note.transcript):,}자")
+    c1.metric("채널", view_model.channel)
+    c2.metric("업로드", view_model.upload_date)
+    c3.metric("자막 길이", f"{view_model.transcript_length:,}자")
 
     tab_summary, tab_transcript, tab_markdown = st.tabs(["요약", "원문", "Markdown"])
     with tab_summary:
-        if note.summary:
+        if view_model.has_summary:
             st.markdown("### 요약")
-            st.markdown(f"- **기존 문제**: {note.summary.problem}")
-            st.markdown(f"- **제안 방법**: {note.summary.method}")
-            st.markdown(f"- **효과**: {note.summary.effect}")
+            st.markdown(f"- **기존 문제**: {view_model.summary_problem}")
+            st.markdown(f"- **제안 방법**: {view_model.summary_method}")
+            st.markdown(f"- **효과**: {view_model.summary_effect}")
             st.markdown("### 키워드")
-            st.markdown(" ".join(f"`{keyword}`" for keyword in note.summary.keywords))
-            st.caption(f"분류: `{note.summary.category}`")
+            st.markdown(" ".join(f"`{keyword}`" for keyword in view_model.summary_keywords))
+            st.caption(f"분류: `{view_model.summary_category}`")
         else:
             st.info("AI 요약 생성을 켜고 다시 추출하면 knowledge/youtube 형식의 요약과 키워드가 추가됩니다.")
     with tab_transcript:
-        st.text_area("자막 원문", note.transcript, height=420)
+        st.text_area("자막 원문", view_model.transcript, height=420)
     with tab_markdown:
-        st.code(markdown, language="markdown")
+        st.code(view_model.markdown, language="markdown")
 
     st.download_button(
         "Markdown 받기",
-        data=markdown.encode("utf-8"),
-        file_name=_download_filename(note),
+        data=view_model.markdown.encode("utf-8"),
+        file_name=view_model.download_filename,
         mime="text/markdown",
-        use_container_width=True,
+        width="stretch",
     )

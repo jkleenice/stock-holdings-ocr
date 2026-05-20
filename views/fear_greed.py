@@ -1,60 +1,24 @@
 from __future__ import annotations
 
-from datetime import date, datetime
-
 import pandas as pd
 import plotly.graph_objects as go
-import requests
 import streamlit as st
 
-
-FNG_URL = "https://api.alternative.me/fng/"
-
-
-def _fetch_fng_raw(limit: int = 30) -> list[dict]:
-    """Pull Crypto Fear & Greed history from alternative.me. No caching — testable."""
-    response = requests.get(FNG_URL, params={"limit": limit}, timeout=10)
-    response.raise_for_status()
-    return response.json()["data"]
+from holdings_ocr.market_sentiment import (
+    FearGreedPanelViewModel,
+    bar_color,
+    build_fng_panel_view_model,
+    fetch_fng_raw,
+    fng_history_as_of,
+    korean_label,
+    market_status_summary,
+)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def _fetch_fng(limit: int = 30) -> list[dict]:
-    """Cached wrapper around `_fetch_fng_raw` (1 hour TTL)."""
-    return _fetch_fng_raw(limit=limit)
-
-
-def _bar_color(value: int) -> str:
-    if value < 25:
-        return "#e45756"
-    if value < 45:
-        return "#f4a261"
-    if value < 55:
-        return "#e9c46a"
-    if value < 75:
-        return "#9acd32"
-    return "#2ca02c"
-
-
-def _korean_label(classification: str) -> str:
-    mapping = {
-        "Extreme Fear": "극도의 공포",
-        "Fear": "공포",
-        "Neutral": "중립",
-        "Greed": "탐욕",
-        "Extreme Greed": "극도의 탐욕",
-    }
-    return mapping.get(classification, classification)
-
-
-def _metric_value(v: int | None) -> int | str:
-    """Return the value itself, or em-dash when None. Critically: 0 stays 0 (not falsy fallback)."""
-    return v if v is not None else "—"
-
-
-def _metric_delta(current: int, prior: int | None) -> int | None:
-    """Signed difference; None when prior is missing so Streamlit hides the delta indicator."""
-    return (current - prior) if prior is not None else None
+    """Cached wrapper around the Fear & Greed API (1 hour TTL)."""
+    return fetch_fng_raw(limit=limit)
 
 
 def _fng_gauge_figure(value: int, label_ko: str, classification: str) -> go.Figure:
@@ -77,7 +41,7 @@ def _fng_gauge_figure(value: int, label_ko: str, classification: str) -> go.Figu
                 "tickvals": [0, 25, 45, 55, 75, 100],
                 "ticktext": ["0", "25", "45", "55", "75", "100"],
             },
-            "bar": {"color": _bar_color(value), "thickness": 0.25},
+            "bar": {"color": bar_color(value), "thickness": 0.25},
             "steps": [
                 {"range": [0, 25], "color": "#fadbd8"},
                 {"range": [25, 45], "color": "#fdebd0"},
@@ -100,91 +64,45 @@ def _fng_gauge_figure(value: int, label_ko: str, classification: str) -> go.Figu
     return fig
 
 
-def _fng_history_df(data: list[dict]) -> pd.DataFrame:
-    return pd.DataFrame([
-        {
-            "날짜": datetime.fromtimestamp(int(d["timestamp"])),
-            "지수": int(d["value"]),
-            "분류": d["value_classification"],
-        }
-        for d in reversed(data)
-    ])
-
-
-def _fng_item_date(item: dict) -> date:
-    return datetime.fromtimestamp(int(item["timestamp"])).date()
-
-
-def _fng_history_as_of(data: list[dict], as_of_date: date) -> list[dict]:
-    sorted_data = sorted(data, key=lambda item: int(item["timestamp"]), reverse=True)
-    return [item for item in sorted_data if _fng_item_date(item) <= as_of_date]
-
-
-def _get_fng_at(data: list[dict], idx: int) -> int | None:
-    if idx >= len(data):
-        return None
-    return int(data[idx]["value"])
-
-
-def _render_fng_panel(data: list[dict]) -> None:
+def _render_fng_panel(view_model: FearGreedPanelViewModel) -> None:
     st.subheader("기준일 코인 공포·탐욕")
-    if not data:
+    if not view_model.has_data or view_model.value is None:
         st.warning("기준일에 사용할 공포·탐욕 지수 데이터가 없어요")
         return
 
-    current = data[0]
-    value = int(current["value"])
-    classification = current["value_classification"]
-    label_ko = _korean_label(classification)
     st.plotly_chart(
-        _fng_gauge_figure(value, label_ko, classification),
-        use_container_width=True,
+        _fng_gauge_figure(view_model.value, view_model.label_ko, view_model.classification),
+        width="stretch",
     )
 
-    def _safe_metric(col, label: str, past: int | None) -> None:
-        if past is None:
+    def _safe_metric(col, label: str, value: int | str, delta: int | None) -> None:
+        if value == "—":
             col.metric(label, "데이터 없음")
         else:
-            col.metric(label, past, value - past)
+            col.metric(label, value, delta)
 
     c1, c2, c3 = st.columns(3)
-    _safe_metric(c1, "전일", _get_fng_at(data, 1))
-    _safe_metric(c2, "7일 전", _get_fng_at(data, 7))
-    _safe_metric(c3, "30일 전", _get_fng_at(data, 29))
+    for col, metric in zip((c1, c2, c3), view_model.metrics):
+        _safe_metric(col, metric.label, metric.value, metric.delta)
     st.caption(
-        f"지표 기준일: {_fng_item_date(current).isoformat()} · "
+        f"지표 기준일: {view_model.as_of_date} · "
         "공포·탐욕 지수는 손익과 무관한 시장 심리 지표예요"
     )
 
 
-def _render_fng_history(data: list[dict]) -> None:
-    if not data:
+def _render_fng_history(view_model: FearGreedPanelViewModel) -> None:
+    if not view_model.history_rows:
         return
 
     with st.expander("공포·탐욕 기준일 이전 30개 추이"):
-        df = _fng_history_df(data)
+        df = pd.DataFrame(view_model.history_rows)
         st.line_chart(df.set_index("날짜")["지수"], height=240)
         st.dataframe(
-            df.assign(분류=df["분류"].map(lambda c: f"{_korean_label(c)} ({c})")),
-            use_container_width=True,
+            df.assign(분류=df["분류"].map(lambda c: f"{korean_label(c)} ({c})")),
+            width="stretch",
             hide_index=True,
         )
         st.caption("매시간 자동 갱신 · alternative.me")
-
-
-def _market_status_summary(data: list[dict], drawdown_rows: list[dict]) -> str:
-    parts = []
-    if data:
-        current = data[0]
-        value = int(current["value"])
-        parts.append(f"코인 심리는 {_korean_label(current['value_classification'])} {value}점")
-    if drawdown_rows:
-        worst = drawdown_rows[0]
-        worst_amount = max(0.0, -worst["기준일 하락률"])
-        parts.append(f"가장 많이 빠진 티커는 {worst['티커']} -{worst_amount:.2f}%")
-    if not parts:
-        return "공포·탐욕 지수 또는 추적 티커를 불러오면 기준일 상태를 한 줄로 요약해요."
-    return " · ".join(parts)
 
 
 def render() -> None:
@@ -199,10 +117,11 @@ def render() -> None:
     )
 
     try:
-        data = _fng_history_as_of(_fetch_fng(limit=0), as_of_date)
+        data = fng_history_as_of(_fetch_fng(limit=0), as_of_date)
     except Exception:
         st.error("잠시 후 다시 시도해주세요. 지수 서버에 일시적으로 연결되지 않아요.")
         data = []
+    fng_view_model = build_fng_panel_view_model(data)
 
     rows: list[dict] = []
     failures: list[tuple[str, str]] = []
@@ -215,11 +134,11 @@ def render() -> None:
         with st.spinner("추적 티커 가격을 불러오는 중..."):
             rows, failures = drawdown.load_drawdown_rows(tracked, period, as_of_date)
 
-    st.info(_market_status_summary(data, rows))
+    st.info(market_status_summary(data, rows))
 
     left, right = st.columns([1.15, 0.85])
     with left:
-        _render_fng_panel(data)
+        _render_fng_panel(fng_view_model)
     with right:
         drawdown.render_drawdown_top3(rows)
 
@@ -232,4 +151,4 @@ def render() -> None:
         st.info("추적 티커를 저장하면 전체 하락률 게이지가 여기에 표시됩니다.")
         st.caption("예: AAPL, MSFT, NVDA, QQQ, BTC-USD, 005930.KS")
 
-    _render_fng_history(data[:30])
+    _render_fng_history(build_fng_panel_view_model(data[:30]))

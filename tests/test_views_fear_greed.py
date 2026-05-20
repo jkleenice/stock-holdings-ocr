@@ -3,40 +3,41 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from views.fear_greed import (
-    _bar_color,
-    _fetch_fng_raw,
-    _fng_history_as_of,
-    _korean_label,
-    _market_status_summary,
-    _metric_delta,
-    _metric_value,
+from holdings_ocr.market_sentiment import (
+    bar_color,
+    build_fng_panel_view_model,
+    fetch_fng_raw,
+    fng_history_as_of,
+    korean_label,
+    market_status_summary,
+    metric_delta,
+    metric_value,
 )
 
 
 def test_bar_color_extreme_fear_red():
-    assert _bar_color(0) == "#e45756"
-    assert _bar_color(24) == "#e45756"
+    assert bar_color(0) == "#e45756"
+    assert bar_color(24) == "#e45756"
 
 
 def test_bar_color_fear_orange():
-    assert _bar_color(25) == "#f4a261"
-    assert _bar_color(44) == "#f4a261"
+    assert bar_color(25) == "#f4a261"
+    assert bar_color(44) == "#f4a261"
 
 
 def test_bar_color_neutral_yellow():
-    assert _bar_color(45) == "#e9c46a"
-    assert _bar_color(54) == "#e9c46a"
+    assert bar_color(45) == "#e9c46a"
+    assert bar_color(54) == "#e9c46a"
 
 
 def test_bar_color_greed_yellow_green():
-    assert _bar_color(55) == "#9acd32"
-    assert _bar_color(74) == "#9acd32"
+    assert bar_color(55) == "#9acd32"
+    assert bar_color(74) == "#9acd32"
 
 
 def test_bar_color_extreme_greed_green():
-    assert _bar_color(75) == "#2ca02c"
-    assert _bar_color(100) == "#2ca02c"
+    assert bar_color(75) == "#2ca02c"
+    assert bar_color(100) == "#2ca02c"
 
 
 @pytest.mark.parametrize("english,korean", [
@@ -47,11 +48,11 @@ def test_bar_color_extreme_greed_green():
     ("Extreme Greed", "극도의 탐욕"),
 ])
 def test_korean_label_translates_known_classifications(english, korean):
-    assert _korean_label(english) == korean
+    assert korean_label(english) == korean
 
 
 def test_korean_label_passes_through_unknown():
-    assert _korean_label("Anything Else") == "Anything Else"
+    assert korean_label("Anything Else") == "Anything Else"
 
 
 def test_fetch_fng_raw_parses_alternative_me_response(monkeypatch):
@@ -72,9 +73,9 @@ def test_fetch_fng_raw_parses_alternative_me_response(monkeypatch):
         captured["timeout"] = timeout
         return fake_response
 
-    monkeypatch.setattr("views.fear_greed.requests.get", fake_get)
+    monkeypatch.setattr("holdings_ocr.market_sentiment.requests.get", fake_get)
 
-    result = _fetch_fng_raw(limit=2)
+    result = fetch_fng_raw(limit=2)
     assert captured["url"] == "https://api.alternative.me/fng/"
     assert captured["params"] == {"limit": 2}
     assert captured["timeout"] == 10
@@ -88,10 +89,10 @@ def test_fetch_fng_raw_raises_on_http_error(monkeypatch):
 
     fake_response = MagicMock()
     fake_response.raise_for_status.side_effect = _requests.HTTPError("502 Bad Gateway")
-    monkeypatch.setattr("views.fear_greed.requests.get", lambda *a, **kw: fake_response)
+    monkeypatch.setattr("holdings_ocr.market_sentiment.requests.get", lambda *a, **kw: fake_response)
 
     with pytest.raises(_requests.HTTPError):
-        _fetch_fng_raw(limit=1)
+        fetch_fng_raw(limit=1)
 
 
 def _fng_item(value: str, day: str) -> dict:
@@ -110,7 +111,7 @@ def test_fng_history_as_of_uses_exact_matching_date_first():
         _fng_item("30", "2024-01-01"),
     ]
 
-    result = _fng_history_as_of(data, date(2024, 1, 3))
+    result = fng_history_as_of(data, date(2024, 1, 3))
 
     assert [item["value"] for item in result] == ["50", "40", "30"]
 
@@ -122,49 +123,63 @@ def test_fng_history_as_of_falls_back_to_previous_date():
         _fng_item("20", "2024-01-01"),
     ]
 
-    result = _fng_history_as_of(data, date(2024, 1, 4))
+    result = fng_history_as_of(data, date(2024, 1, 4))
 
     assert [item["value"] for item in result] == ["40", "20"]
 
 
 def test_metric_value_preserves_zero():
     """Critical: 0 (Extreme Fear bottom) must not be replaced by em-dash."""
-    assert _metric_value(0) == 0
+    assert metric_value(0) == 0
 
 
 def test_metric_value_preserves_hundred():
-    assert _metric_value(100) == 100
+    assert metric_value(100) == 100
 
 
 def test_metric_value_none_becomes_dash():
-    assert _metric_value(None) == "—"
+    assert metric_value(None) == "—"
 
 
 def test_metric_delta_signed_difference():
-    assert _metric_delta(50, 30) == 20
-    assert _metric_delta(30, 50) == -20
+    assert metric_delta(50, 30) == 20
+    assert metric_delta(30, 50) == -20
 
 
 def test_metric_delta_prior_zero_does_not_fallthrough_to_none():
     """If yesterday was 0, today's delta should still compute (not None)."""
-    assert _metric_delta(15, 0) == 15
+    assert metric_delta(15, 0) == 15
 
 
 def test_metric_delta_none_prior_returns_none():
-    assert _metric_delta(50, None) is None
+    assert metric_delta(50, None) is None
 
 
 def test_market_status_summary_combines_fng_and_worst_drawdown():
     data = [{"value": "23", "value_classification": "Extreme Fear"}]
     rows = [{"티커": "NVDA", "기준일 하락률": -31.25}]
 
-    summary = _market_status_summary(data, rows)
+    summary = market_status_summary(data, rows)
 
     assert "극도의 공포 23점" in summary
     assert "NVDA -31.25%" in summary
 
 
 def test_market_status_summary_handles_empty_state():
-    summary = _market_status_summary([], [])
+    summary = market_status_summary([], [])
 
     assert "기준일 상태를 한 줄로 요약" in summary
+
+
+def test_build_fng_panel_view_model_keeps_zero_metric_values():
+    data = [
+        _fng_item("15", "2024-01-03"),
+        _fng_item("0", "2024-01-02"),
+    ]
+
+    view_model = build_fng_panel_view_model(data)
+
+    assert view_model.has_data is True
+    assert view_model.value == 15
+    assert view_model.metrics[0].value == 0
+    assert view_model.metrics[0].delta == 15

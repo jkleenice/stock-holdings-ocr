@@ -11,6 +11,13 @@ from holdings_ocr.drawdown import (
     save_tracked_tickers,
     to_yfinance_symbol,
 )
+from holdings_ocr.drawdown_service import (
+    build_drawdown_rows,
+    drawdown_amount,
+    drawdown_label,
+    extract_close_series,
+    format_price,
+)
 
 
 def test_parse_ticker_input_accepts_common_separators_and_dedupes():
@@ -130,3 +137,47 @@ def test_compute_drawdown_series_tracks_running_peak():
     assert series.iloc[2] == pytest.approx(-20.0)
     assert series.iloc[3] == pytest.approx(0.0)
     assert series.iloc[4] == pytest.approx(-50.0)
+
+
+def test_extract_close_series_accepts_yfinance_multiindex_shape():
+    columns = pd.MultiIndex.from_tuples([("Open", "AAPL"), ("Close", "AAPL")])
+    df = pd.DataFrame([[99.0, 100.0], [101.0, 102.0]], columns=columns)
+
+    close = extract_close_series(df)
+
+    assert close.tolist() == [100.0, 102.0]
+
+
+def test_drawdown_display_helpers_bucket_values():
+    assert format_price(1234.5) == "1,234"
+    assert format_price(12.345) == "12.35"
+    assert format_price(1.23456) == "1.2346"
+    assert drawdown_amount(-31.5) == pytest.approx(31.5)
+    assert drawdown_label(31.5) == "큰 하락"
+
+
+def test_build_drawdown_rows_uses_injected_fetcher_and_sorts_worst_first():
+    def fake_fetch(symbol: str, period: str) -> pd.Series:
+        assert period == "max"
+        if symbol == "AAPL":
+            return pd.Series(
+                [100.0, 150.0, 120.0],
+                index=pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03"]),
+            )
+        if symbol == "MSFT":
+            return pd.Series(
+                [100.0, 200.0, 100.0],
+                index=pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03"]),
+            )
+        raise AssertionError(symbol)
+
+    rows, failures = build_drawdown_rows(
+        ["AAPL", "MSFT"],
+        "max",
+        "2024-01-03",
+        fetch_close_prices=fake_fetch,
+    )
+
+    assert failures == []
+    assert [row["티커"] for row in rows] == ["MSFT", "AAPL"]
+    assert rows[0]["기준일 하락률"] == pytest.approx(-50.0)
